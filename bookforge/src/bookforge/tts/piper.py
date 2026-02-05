@@ -22,9 +22,8 @@ class PiperBackend(TTSBackend):
         out_path.parent.mkdir(parents=True, exist_ok=True)
 
         safe_text = sanitise_for_tts(chunk.text)
-        text_bytes = safe_text.encode("utf-8")
+        text_bytes = safe_text.encode("utf-8", errors="ignore")
 
-        # Piper length_scale: smaller = faster; map our rate (1.0 = normal) → inverse.
         length_scale = 1.0 / max(config.rate, 0.1)
 
         cmd = [
@@ -46,4 +45,14 @@ class PiperBackend(TTSBackend):
         stdout_bytes, stderr_bytes = proc.communicate(text_bytes)
         if proc.returncode != 0:
             stderr = stderr_bytes.decode("utf-8", errors="ignore")
+            # If Piper is still complaining about surrogates, log & skip this chunk
+            if "surrogates not allowed" in stderr or "\\udc" in stderr.lower():
+                # Log the failing chunk text for later inspection
+                debug_dir = Path("out") / "debug"
+                debug_dir.mkdir(parents=True, exist_ok=True)
+                log_path = debug_dir / f"piper_error_chunk_{chunk.id}.txt"
+                log_path.write_text(safe_text, encoding="utf-8", errors="ignore")
+                # Skip generating audio for this chunk
+                return
             raise RuntimeError(f"Piper failed: {stderr}")
+

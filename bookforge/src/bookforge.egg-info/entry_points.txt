@@ -1,0 +1,2 @@
+[console_scripts]
+bookforge = bookforge.cli:app

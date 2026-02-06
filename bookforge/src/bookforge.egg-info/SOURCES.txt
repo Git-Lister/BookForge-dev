@@ -18,10 +18,12 @@ src/bookforge/audio/m4b.py
 src/bookforge/audio/normalize.py
 src/bookforge/ingest/__init__.py
 src/bookforge/ingest/epub_ingest.py
+src/bookforge/ingest/pdf_ingest.py
 src/bookforge/ingest/txt_ingest.py
 src/bookforge/process/__init__.py
 src/bookforge/process/chunker.py
 src/bookforge/process/cleaner.py
+src/bookforge/process/sanitize.py
 src/bookforge/tts/__init__.py
 src/bookforge/tts/backend.py
 src/bookforge/tts/piper.py

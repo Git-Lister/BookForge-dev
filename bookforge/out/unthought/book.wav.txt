@@ -1,0 +1,2 @@
+file 'C:/Users/DaveH/BookForge-dev/bookforge/out/unthought/chapters/chapter_01.wav'
+file 'C:/Users/DaveH/BookForge-dev/bookforge/out/unthought/chapters/chapter_02.wav'

@@ -19,6 +19,17 @@ class Chunk:
     text: str
     estimated_seconds: float
 
+    def to_dict(self) -> dict:
+        """Serialize chunk metadata (excluding text) for project index."""
+        return {
+            "id": self.id,
+            "chapter_index": self.chapter_index,
+            "relative_index": self.relative_index,
+            "estimated_seconds": self.estimated_seconds,
+            # Audio file name is derived from id
+            "file": f"chunk_{self.id:05d}.wav",
+        }
+
 
 def _estimate_seconds(text: str) -> float:
     words = len(text.split())

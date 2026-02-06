@@ -13,3 +13,4 @@ chunks/
 voices/
 *.wav
 *.m4b
+debug/

@@ -9,9 +9,9 @@ import ffmpeg  # type: ignore[import]
 
 
 def concat_wavs(wav_paths: Iterable[Path], output_path: Path) -> None:
-    """Concatenate multiple WAV files into a single WAV using ffmpeg.
+    """Concatenate multiple WAV files into a single WAV using ffmpeg concat demuxer.
 
-    Assumes all inputs share the same sample rate/format (Piper's output).
+    This avoids Windows command-line length limits by using a list file.
     """
     wav_list: List[Path] = [p for p in wav_paths if p.exists()]
     if not wav_list:
@@ -19,9 +19,22 @@ def concat_wavs(wav_paths: Iterable[Path], output_path: Path) -> None:
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    # Use ffmpeg concat filter
-    inputs = [ffmpeg.input(str(p)) for p in wav_list]
-    joined = ffmpeg.concat(*inputs, v=0, a=1)
-    out = ffmpeg.output(joined, str(output_path))
-    out = ffmpeg.overwrite_output(out)
-    out.run(quiet=True)
+    list_file = output_path.with_suffix(output_path.suffix + ".txt")
+
+    # Write the list file in the format required by ffmpeg concat demuxer:
+    # file '/full/path/to/file1.wav'
+    # file '/full/path/to/file2.wav'
+    with list_file.open("w", encoding="utf-8") as f:
+        for p in wav_list:
+            abs_path = p.resolve()
+            # Escape single quotes for ffmpeg
+            path_str = abs_path.as_posix().replace("'", r"'\''")
+            f.write(f"file '{path_str}'\n")
+
+    (
+        ffmpeg
+        .input(str(list_file), format="concat", safe=0)
+        .output(str(output_path), acodec="copy")
+        .overwrite_output()
+        .run(quiet=True)
+    )

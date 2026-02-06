@@ -13,6 +13,8 @@ from .ingest.txt_ingest import load_txt, BookText as TxtBookText
 from .process.cleaner import clean_text
 from .process.chunker import chunk_chapter
 from .tts.piper import PiperBackend
+from .audio.concat import concat_wavs
+
 
 app = typer.Typer(help="Convert texts/epubs into audiobooks using local TTS.")
 
@@ -59,7 +61,17 @@ def process(
             typer.echo(f"  Synthesizing chunk {chunk.id} → {out_wav.name}")
             backend.synthesize_chunk(chunk, config, out_wav)
 
-    typer.echo("Done (audio chunks only). Packaging to chapters/book WAV will come next.")
+        # After synthesizing all chunks, concatenate them into a single book.wav
+    chunks_dir = output_dir / "chunks"
+    chunk_files = sorted(chunks_dir.glob("chunk_*.wav"))
+
+    if chunk_files:
+        book_wav = output_dir / "book.wav"
+        typer.echo(f"Concatenating {len(chunk_files)} chunks into {book_wav} ...")
+        concat_wavs(chunk_files, book_wav)
+        typer.echo("Done. Generated book.wav and individual chunk WAVs.")
+    else:
+        typer.echo("No chunk WAV files found; nothing to concatenate.")
 
 
 @app.command()

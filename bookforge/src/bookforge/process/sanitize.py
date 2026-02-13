@@ -1,68 +1,59 @@
-"""Utilities to sanitise text before sending to TTS engines."""
+"""Text sanitization for TTS engines."""
 
 from __future__ import annotations
 
+import re
 import unicodedata
-from pathlib import Path
-
-
-DEBUG_SANITISE = False  # flip to True if you want debug dumps
-
-
-def _is_surrogate(ch: str) -> bool:
-    code = ord(ch)
-    return 0xD800 <= code <= 0xDFFF
-
-
-def _is_control(ch: str) -> bool:
-    # Keep whitespace, drop other control chars
-    if ch in ("\n", "\r", "\t"):
-        return False
-    return unicodedata.category(ch)[0] == "C"
-
-
-def _debug_dump(label: str, text: str) -> None:
-    if not DEBUG_SANITISE:
-        return
-    debug_dir = Path("out") / "debug"
-    debug_dir.mkdir(parents=True, exist_ok=True)
-    # Append for now
-    with (debug_dir / "sanitise_log.txt").open("a", encoding="utf-8") as f:
-        f.write(f"\n--- {label} ---\n")
-        f.write(repr(text))
-        f.write("\n")
 
 
 def sanitise_for_tts(text: str) -> str:
-    """Remove or normalise characters that TTS backends commonly reject."""
-    _debug_dump("raw", text)
-
-    cleaned_chars: list[str] = []
-
-    for ch in text:
-        if _is_surrogate(ch):
-            continue
-        if _is_control(ch):
-            continue
-        cleaned_chars.append(ch)
-
-    cleaned = "".join(cleaned_chars)
-
-    # Normalise punctuation
-    cleaned = cleaned.replace("—", "-").replace("–", "-")
-    cleaned = cleaned.replace("“", '"').replace("”", '"')
-    cleaned = cleaned.replace("’", "'")
-
-    # Unicode normalisation
-    cleaned = unicodedata.normalize("NFC", cleaned)
-    _debug_dump("after_basic", cleaned)
-
-    # Final safety: drop anything that can't be encoded in UTF-8
-    cleaned_bytes = cleaned.encode("utf-8", errors="ignore")
-    cleaned_final = cleaned_bytes.decode("utf-8", errors="ignore")
-
-    # Extra: if somehow any surrogate survived, remove by codepoint check
-    cleaned_final = "".join(ch for ch in cleaned_final if not _is_surrogate(ch))
-
-    _debug_dump("final", cleaned_final)
-    return cleaned_final
+    """
+    Sanitize text for TTS synthesis.
+    
+    - Remove/replace characters that cause TTS errors
+    - Expand abbreviations for better pronunciation
+    - Add prosody hints (pauses) for natural rhythm
+    """
+    # Normalize unicode (remove weird encoding artifacts)
+    text = unicodedata.normalize("NFKC", text)
+    
+    # Remove or replace problematic characters
+    text = text.replace('\u200b', '')  # Zero-width space
+    text = text.replace('\ufeff', '')  # BOM
+    text = text.replace('\r', '')      # Windows line endings
+    
+    # Replace em/en dashes with hyphens (TTS handles better)
+    text = text.replace('—', ' - ')
+    text = text.replace('–', ' - ')
+    
+    # Expand common abbreviations that TTS mispronounces
+    text = text.replace("e.g.", "for example")
+    text = text.replace("E.g.", "For example")
+    text = text.replace("i.e.", "that is")
+    text = text.replace("I.e.", "That is")
+    text = text.replace("etc.", "et cetera")
+    text = text.replace("vs.", "versus")
+    text = text.replace("c.f.", "compare")
+    
+    # Expand academic abbreviations
+    text = text.replace("et al.", "and others")
+    text = text.replace("ibid.", "same source")
+    text = text.replace("op. cit.", "previously cited")
+    
+    # Add natural pauses for better rhythm
+    # (Piper doesn't support SSML, but we can use strategic spacing)
+    
+    # Longer pause after sentence-ending punctuation
+    text = re.sub(r'([.!?])\s+', r'\1  ', text)  # Double space
+    
+    # Preserve paragraph breaks for natural pauses
+    text = re.sub(r'\n\n+', '\n\n', text)
+    
+    # Clean up excessive whitespace but preserve intentional breaks
+    text = re.sub(r'[ \t]+', ' ', text)  # Multiple spaces/tabs → single space
+    text = text.strip()
+    
+    # Final safety: remove any remaining surrogates or non-UTF8 chars
+    text = text.encode('utf-8', errors='ignore').decode('utf-8', errors='ignore')
+    
+    return text

@@ -4,8 +4,16 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Iterable, List
+import os
 
 import ffmpeg  # type: ignore[import]
+
+
+# Set explicit path to ffmpeg if not on PATH
+FFMPEG_BIN = os.environ.get(
+    "BOOKFORGE_FFMPEG",
+    r"C:\Users\55124152\OneDrive - MMU\DLS\Tools\ffmpeg-8.0.1-essentials_build\ffmpeg-8.0.1-essentials_build\bin\ffmpeg.exe",
+)
 
 
 def concat_wavs(wav_paths: Iterable[Path], output_path: Path) -> None:
@@ -36,5 +44,5 @@ def concat_wavs(wav_paths: Iterable[Path], output_path: Path) -> None:
         .input(str(list_file), format="concat", safe=0)
         .output(str(output_path), acodec="copy")
         .overwrite_output()
-        .run(quiet=True)
+        .run(cmd=FFMPEG_BIN, quiet=True)
     )

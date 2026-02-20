@@ -14,7 +14,7 @@ from .process.cleaner import clean_text
 from .process.chunker import chunk_chapter, Chunk
 from .audio.concat import concat_wavs
 from .tts.piper import PiperBackend
-
+from .tts.xtts import XTTSBackend
 
 app = typer.Typer(help="Convert texts/epubs into audiobooks using local TTS.")
 
@@ -78,6 +78,16 @@ def process(
             "(e.g. en_GB-southern_english_female-medium.onnx)."
         ),
     ),
+    backend: str = typer.Option(
+        "piper",
+        "--backend",
+        help="TTS backend to use: 'piper' or 'xtts'",
+    ),
+    speaker_wav: Optional[Path] = typer.Option(
+        None,
+        "--speaker-wav",
+        help="Optional reference WAV for XTTS voice cloning",
+    ),
     preset: str = "calm_longform",
     skip_first_chunks: int = typer.Option(
         0,
@@ -120,14 +130,21 @@ def process(
     output_dir.mkdir(parents=True, exist_ok=True)
     project = BookProject(output_dir)
     config = PresetConfig.load(preset)
-    backend = PiperBackend(str(voice_model))
+
+    # Choose TTS backend
+    if backend == "piper":
+        tts_backend = PiperBackend(str(voice_model))
+    elif backend == "xtts":
+        tts_backend = XTTSBackend(speaker_wav=speaker_wav)
+    else:
+        raise typer.BadParameter(f"Unknown backend: {backend}")
 
     typer.echo(f"Loading text from {input_file} ...")
     # Pass chapter detection options to loader
     book: TxtBookText = load_txt(
         input_file,
         chapter_strategy=chapter_strategy,
-        min_confidence=chapter_min_confidence
+        min_confidence=chapter_min_confidence,
     )
 
     typer.echo(f"Title: {book.title}")
@@ -161,7 +178,7 @@ def process(
                 f"  Synthesizing chunk {chunk.id} (chapter {chapter_index + 1}) "
                 f"→ {out_wav.name}"
             )
-            backend.synthesize_chunk(chunk, config, out_wav)
+            tts_backend.synthesize_chunk(chunk, config, out_wav)
             all_chunk_meta.append(chunk.to_dict())
 
     # Save project index
@@ -195,10 +212,10 @@ def process(
         if book_wav.exists():
             typer.echo(f"\nNormalizing audio to {target_lufs} LUFS ...")
             normalized_wav = output_dir / "book_normalized.wav"
-            
+
             from .audio.normalise import normalize_audio
             normalize_audio(book_wav, normalized_wav, target_lufs=target_lufs)
-            
+
             # Replace original with normalized version
             book_wav.unlink()
             normalized_wav.rename(book_wav)

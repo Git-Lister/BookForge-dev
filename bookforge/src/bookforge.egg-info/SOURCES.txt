@@ -28,4 +28,5 @@ src/bookforge/process/sanitize.py
 src/bookforge/tts/__init__.py
 src/bookforge/tts/backend.py
 src/bookforge/tts/piper.py
+src/bookforge/tts/xtts.py
 tests/test_imports.py

@@ -1,0 +1,5 @@
+{
+  "source_file": "C:\\Users\\DaveH\\BookForge-dev\\bookforge\\books\\unthought.txt",
+  "preset": "calm_longform",
+  "voice_model": "C:\\Users\\DaveH\\BookForge-dev\\bookforge\\voices\\en_GB-southern_english_female-low.onnx"
+}

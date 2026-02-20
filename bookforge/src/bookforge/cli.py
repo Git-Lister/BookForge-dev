@@ -84,6 +84,34 @@ def process(
         "--skip-first-chunks",
         help="Number of initial chunks to skip when building chapter/book WAVs.",
     ),
+    chapter_strategy: str = typer.Option(
+        "auto",
+        "--chapter-strategy",
+        help=(
+            "Chapter detection method: "
+            "auto (default, tries multiple strategies), "
+            "markdown (# headers), "
+            "structured (Chapter N, Part I, etc.), "
+            "heuristic (contextual scoring), "
+            "paragraph (large gaps), "
+            "none (single chapter)"
+        ),
+    ),
+    chapter_min_confidence: float = typer.Option(
+        0.5,
+        "--chapter-min-confidence",
+        help="Minimum confidence for chapter detection (0.0-1.0).",
+    ),
+    normalize: bool = typer.Option(
+        False,
+        "--normalize",
+        help="Apply loudness normalization to final book.wav (EBU R128 standard).",
+    ),
+    target_lufs: float = typer.Option(
+        -16.0,
+        "--target-lufs",
+        help="Target loudness in LUFS for normalization (default: -16.0 for audiobooks).",
+    ),
 ) -> None:
     """Process INPUT_FILE into an audiobook under OUTPUT_DIR (TXT only for now)."""
     if not input_file.exists():
@@ -95,11 +123,24 @@ def process(
     backend = PiperBackend(str(voice_model))
 
     typer.echo(f"Loading text from {input_file} ...")
-    # TODO: detect EPUB vs TXT; for now assume TXT
-    book: TxtBookText = load_txt(input_file)
+    # Pass chapter detection options to loader
+    book: TxtBookText = load_txt(
+        input_file,
+        chapter_strategy=chapter_strategy,
+        min_confidence=chapter_min_confidence
+    )
 
     typer.echo(f"Title: {book.title}")
     typer.echo(f"Chapters: {len(book.chapters)}")
+
+    # Report detected chapter titles
+    if book.chapter_titles:
+        typer.echo("\nDetected chapters:")
+        for i, title in enumerate(book.chapter_titles[:10]):  # Show first 10
+            typer.echo(f"  {i + 1}. {title}")
+        if len(book.chapter_titles) > 10:
+            typer.echo(f"  ... and {len(book.chapter_titles) - 10} more")
+        typer.echo("")
 
     all_chunk_meta: List[Dict[str, object]] = []
     chunk_id = 0
@@ -135,6 +176,11 @@ def process(
             "source_file": str(input_file.resolve()),
             "preset": preset,
             "voice_model": str(voice_model),
+<<<<<<< HEAD
+=======
+            "chapter_strategy": chapter_strategy,
+            "chapter_min_confidence": chapter_min_confidence,
+>>>>>>> a106b5adb4cfb29e4a5155a15b8489c180cacb80
         }
     )
 
@@ -145,6 +191,26 @@ def process(
 
     _rebuild_audio_from_index(project, all_chunk_meta, skip_first_chunks=skip_first_chunks)
     typer.echo(f"  - {len(all_chunk_meta)} chunk WAVs in {project.chunks_dir}")
+<<<<<<< HEAD
+=======
+
+    # Apply normalization if requested
+    if normalize:
+        book_wav = output_dir / "book.wav"
+        if book_wav.exists():
+            typer.echo(f"\nNormalizing audio to {target_lufs} LUFS ...")
+            normalized_wav = output_dir / "book_normalized.wav"
+            
+            from .audio.normalise import normalize_audio
+            normalize_audio(book_wav, normalized_wav, target_lufs=target_lufs)
+            
+            # Replace original with normalized version
+            book_wav.unlink()
+            normalized_wav.rename(book_wav)
+            typer.echo(f"✓ Normalized {book_wav}")
+        else:
+            typer.echo("Warning: book.wav not found, skipping normalization.")
+>>>>>>> a106b5adb4cfb29e4a5155a15b8489c180cacb80
 
 
 @app.command()
@@ -198,7 +264,11 @@ def review(
             f"Chapter index {chapter_idx} out of range for source text."
         )
 
+<<<<<<< HEAD
     from .process.chunker import chunk_chapter as re_chunk_chapter  # local alias
+=======
+    from .process.chunker import chunk_chapter as re_chunk_chapter
+>>>>>>> a106b5adb4cfb29e4a5155a15b8489c180cacb80
 
     preset_name = str(meta.get("preset", "calm_longform"))
     config = PresetConfig.load(preset_name)
@@ -252,6 +322,46 @@ def review(
     # Rebuild chapter WAV(s) and book.wav
     typer.echo("Rebuilding chapter and book audio after chunk update ...")
     _rebuild_audio_from_index(project, index, skip_first_chunks=skip_first_chunks)
+<<<<<<< HEAD
+=======
+
+@app.command()
+def normalise(
+    audio_file: Path,
+    output_file: Optional[Path] = typer.Option(
+        None,
+        "--output",
+        "-o",
+        help="Output file path (default: adds '_normalised' suffix to input)",
+    ),
+    target_lufs: float = typer.Option(
+        -16.0,
+        "--target-lufs",
+        help="Target loudness in LUFS (default: -16.0 for audiobooks).",
+    ),
+) -> None:
+    """Normalise an existing audio file to consistent loudness (EBU R128)."""
+    if not audio_file.exists():
+        raise typer.BadParameter(f"Audio file not found: {audio_file}")
+
+    # Default output: same name with _normalised suffix
+    if output_file is None:
+        output_file = audio_file.parent / f"{audio_file.stem}_normalised{audio_file.suffix}"
+
+    typer.echo(f"Normalising {audio_file} ...")
+    typer.echo(f"Target loudness: {target_lufs} LUFS")
+    typer.echo("This may take several minutes for large files...")
+
+    from .audio.normalise import normalize_audio
+    normalize_audio(audio_file, output_file, target_lufs=target_lufs)
+
+    file_size_mb = output_file.stat().st_size / (1024 * 1024)
+    typer.echo(f"\n✓ Success!")
+    typer.echo(f"  Input:  {audio_file}")
+    typer.echo(f"  Output: {output_file}")
+    typer.echo(f"  Size:   {file_size_mb:.1f} MB")
+
+>>>>>>> a106b5adb4cfb29e4a5155a15b8489c180cacb80
 
 
 def main() -> None:

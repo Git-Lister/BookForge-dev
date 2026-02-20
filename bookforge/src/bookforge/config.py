@@ -1,10 +1,12 @@
 """Configuration and preset handling."""
 
 from pathlib import Path
-from pydantic_settings import BaseSettings
+from pydantic import BaseModel
+import yaml
 
 
-class PresetConfig(BaseSettings):
+class PresetConfig(BaseModel):
+    """Voice and pacing configuration preset."""
     voice: str
     rate: float = 1.0
     pitch: float = 0.0
@@ -16,7 +18,17 @@ class PresetConfig(BaseSettings):
 
     @classmethod
     def load(cls, name: str) -> "PresetConfig":
-        """Load preset from presets/<name>.yaml (simple stub)."""
-        # TODO: implement proper YAML reading & validation
-        # For now, return defaults with given voice name.
-        return cls(voice=name)
+        """Load preset from presets/<name>.yaml file."""
+        # Look for preset file in presets/ directory
+        preset_file = Path(__file__).parent.parent.parent / "presets" / f"{name}.yaml"
+        
+        if not preset_file.exists():
+            # Fallback to defaults if preset not found
+            return cls(voice=name)
+        
+        try:
+            with preset_file.open("r", encoding="utf-8") as f:
+                data = yaml.safe_load(f)
+            return cls(**data)
+        except Exception as e:
+            raise ValueError(f"Failed to load preset '{name}': {e}")

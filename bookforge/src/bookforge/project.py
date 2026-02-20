@@ -1,4 +1,8 @@
+<<<<<<< HEAD
 # src/bookforge/project.py
+=======
+"""BookProject manages project directories & chunk index."""
+>>>>>>> a106b5adb4cfb29e4a5155a15b8489c180cacb80
 
 from __future__ import annotations
 

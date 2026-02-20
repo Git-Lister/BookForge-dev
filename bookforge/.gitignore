@@ -13,4 +13,11 @@ chunks/
 voices/
 *.wav
 *.m4b
+*.m4a
 debug/
+
+# Generated audiobooks and project outputs
+out/
+
+# Allow keeping example/test input files
+!books/

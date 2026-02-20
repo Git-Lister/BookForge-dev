@@ -1,2 +1,2 @@
-file 'C:/Users/DaveH/BookForge-dev/bookforge/out/unthought/chapters/chapter_01.wav'
-file 'C:/Users/DaveH/BookForge-dev/bookforge/out/unthought/chapters/chapter_02.wav'
+file 'C:/Users/55124152/OneDrive - MMU/DLS/Book-Forge=Dev/BookForge-dev/bookforge/out/unthought/chapters/chapter_01.wav'
+file 'C:/Users/55124152/OneDrive - MMU/DLS/Book-Forge=Dev/BookForge-dev/bookforge/out/unthought/chapters/chapter_02.wav'

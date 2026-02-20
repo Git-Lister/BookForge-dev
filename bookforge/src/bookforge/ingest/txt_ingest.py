@@ -1,52 +1,72 @@
-"""Plain text ingestion for BookForge."""
+"""Plain text ingestion with chapter detection."""
 
 from __future__ import annotations
 
-import re
-from dataclasses import dataclass
 from pathlib import Path
+from dataclasses import dataclass
 from typing import List
+
+from ..process.chapter_detector import ChapterDetector
 
 
 @dataclass
 class BookText:
-    """Simple representation of a book's text content."""
-
     title: str
     chapters: List[str]
+    chapter_titles: List[str] = None  # Store detected chapter titles
 
 
-CHAPTER_HEADING_RE = re.compile(r"^\s*(chapter\s+\d+|chapter\s+[ivxlcdm]+)\b", re.IGNORECASE)
-
-
-def load_txt(path: Path) -> BookText:
-    """Load a plain text file and split into chapters.
-
-    Heuristic:
-    - Strip leading/trailing whitespace.
-    - Split into lines.
-    - Start a new chapter when a line matches CHAPTER_HEADING_RE.
-    - If no headings found, treat whole file as a single chapter.
+def load_txt(
+    path: Path,
+    chapter_strategy: str = "auto",
+    min_confidence: float = 0.5
+) -> BookText:
+    """Load plain text with automatic chapter detection.
+    
+    Args:
+        path: Path to text file
+        chapter_strategy: Detection method (auto, markdown, structured, 
+                         heuristic, paragraph, none)
+        min_confidence: Minimum confidence threshold for boundaries
+    
+    Returns:
+        BookText with detected chapters
     """
     text = path.read_text(encoding="utf-8", errors="ignore")
-    lines = text.splitlines()
 
-    chapters: List[List[str]] = [[]]
-    found_heading = False
+    detector = ChapterDetector()
+    boundaries = detector.detect(
+        text,
+        strategy=chapter_strategy,
+        min_confidence=min_confidence
+    )
 
-    for line in lines:
-        if CHAPTER_HEADING_RE.match(line):
-            found_heading = True
-            # start new chapter, keep heading line
-            if chapters[-1]:
-                chapters.append([])
-            chapters[-1].append(line)
-        else:
-            chapters[-1].append(line)
+    if not boundaries:
+        # Fallback: treat as single chapter
+        return BookText(
+            title=path.stem,
+            chapters=[text],
+            chapter_titles=["Full Text"]
+        )
 
-    if not found_heading:
-        # single chapter: entire text
-        return BookText(title=path.stem, chapters=["\n".join(lines)])
+    # Split text at detected boundaries
+    lines = text.split('\n')
+    chapters = []
+    chapter_titles = []
 
-    chapter_texts = ["\n".join(ch).strip() for ch in chapters if any(l.strip() for l in ch)]
-    return BookText(title=path.stem, chapters=chapter_texts)
+    for i, boundary in enumerate(boundaries):
+        start = boundary.line_index
+        end = boundaries[i + 1].line_index if i + 1 < len(boundaries) else len(lines)
+
+        chapter_text = '\n'.join(lines[start:end])
+        chapters.append(chapter_text)
+        
+        # Use detected title or generate fallback
+        title = boundary.title or f"Chapter {i + 1}"
+        chapter_titles.append(title)
+
+    return BookText(
+        title=path.stem,
+        chapters=chapters,
+        chapter_titles=chapter_titles
+    )

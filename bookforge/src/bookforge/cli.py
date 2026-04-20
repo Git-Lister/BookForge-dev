@@ -69,13 +69,14 @@ def _rebuild_audio_from_index(
 def process(
     input_file: Path,
     output_dir: Path,
-    voice_model: Path = typer.Option(
-        ...,
+    voice_model: Optional[Path] = typer.Option(
+        None,
         "--voice-model",
         "-m",
         help=(
             "Path to Piper ONNX model file "
-            "(e.g. en_GB-southern_english_female-medium.onnx)."
+            "(e.g. en_GB-southern_english_female-medium.onnx). "
+            "Required when --backend piper."
         ),
     ),
     backend: str = typer.Option(
@@ -133,6 +134,10 @@ def process(
 
     # Choose TTS backend
     if backend == "piper":
+        if voice_model is None:
+            raise typer.BadParameter(
+                "You must provide --voice-model when using backend 'piper'."
+            )
         tts_backend = PiperBackend(str(voice_model))
     elif backend == "xtts":
         tts_backend = XTTSBackend(speaker_wav=speaker_wav)
@@ -193,11 +198,8 @@ def process(
             "source_file": str(input_file.resolve()),
             "preset": preset,
             "voice_model": str(voice_model),
-<<<<<<< HEAD
-=======
             "chapter_strategy": chapter_strategy,
             "chapter_min_confidence": chapter_min_confidence,
->>>>>>> a106b5adb4cfb29e4a5155a15b8489c180cacb80
         }
     )
 
@@ -208,8 +210,6 @@ def process(
 
     _rebuild_audio_from_index(project, all_chunk_meta, skip_first_chunks=skip_first_chunks)
     typer.echo(f"  - {len(all_chunk_meta)} chunk WAVs in {project.chunks_dir}")
-<<<<<<< HEAD
-=======
 
     # Apply normalization if requested
     if normalize:
@@ -227,7 +227,6 @@ def process(
             typer.echo(f"✓ Normalized {book_wav}")
         else:
             typer.echo("Warning: book.wav not found, skipping normalization.")
->>>>>>> a106b5adb4cfb29e4a5155a15b8489c180cacb80
 
 
 @app.command()
@@ -281,11 +280,7 @@ def review(
             f"Chapter index {chapter_idx} out of range for source text."
         )
 
-<<<<<<< HEAD
-    from .process.chunker import chunk_chapter as re_chunk_chapter  # local alias
-=======
     from .process.chunker import chunk_chapter as re_chunk_chapter
->>>>>>> a106b5adb4cfb29e4a5155a15b8489c180cacb80
 
     preset_name = str(meta.get("preset", "calm_longform"))
     config = PresetConfig.load(preset_name)
@@ -339,8 +334,6 @@ def review(
     # Rebuild chapter WAV(s) and book.wav
     typer.echo("Rebuilding chapter and book audio after chunk update ...")
     _rebuild_audio_from_index(project, index, skip_first_chunks=skip_first_chunks)
-<<<<<<< HEAD
-=======
 
 @app.command()
 def normalise(
@@ -378,7 +371,6 @@ def normalise(
     typer.echo(f"  Output: {output_file}")
     typer.echo(f"  Size:   {file_size_mb:.1f} MB")
 
->>>>>>> a106b5adb4cfb29e4a5155a15b8489c180cacb80
 
 
 def main() -> None:

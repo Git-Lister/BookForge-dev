@@ -1,11 +1,11 @@
 ```markdown
 # BookForge
 
-Convert text files into audiobooks using local TTS (Piper).
+Convert text files into audiobooks using local TTS (Piper or XTTS).
 
 ## Requirements
 
-- Python 3.10+
+- Python 3.13+
 - ffmpeg (for audio concatenation)
 - ~2GB disk space for voice models
 
@@ -21,7 +21,7 @@ cd BookForge-dev/bookforge
 ### 2. Create and activate virtual environment
 
 ```bash
-python -m venv .venv
+python -m venv .venv --upgrade-deps
 ```
 
 **Windows:**
@@ -37,7 +37,14 @@ source .venv/bin/activate
 ### 3. Install Python dependencies
 
 ```bash
+# For Piper TTS only:
 pip install -e ".[dev,piper]"
+
+# For XTTS support (requires more dependencies):
+pip install -e ".[dev,xtts]"
+
+# For both + Streamlit UI:
+pip install -e ".[dev,piper,xtts,ui]"
 ```
 
 If you encounter `ModuleNotFoundError: No module named 'pathvalidate'`:
@@ -108,13 +115,24 @@ Commands:
 
 ### Process a text file
 
-```bash
-bookforge process books/input.txt out/output ^
-  --voice-model "voices/en_GB-southern_english_female-low.onnx" ^
-  --skip-first-chunks 0
+**Windows (single-line - recommended):**
+```batch
+bookforge process books/test.txt out/my-audiobook --backend piper --voice-model voices/en_GB-southern_english_female-low.onnx
 ```
 
-**Note:** On Linux/Mac use `\` instead of `^` for line continuation.
+**Windows (multi-line with `^`):**
+```batch
+bookforge process books/test.txt out/my-audiobook ^
+  --backend piper ^
+  --voice-model voices/en_GB-southern_english_female-low.onnx
+```
+
+**Linux/Mac (multi-line with `\`):**
+```bash
+bookforge process books/test.txt out/my-audiobook \
+  --backend piper \
+  --voice-model voices/en_GB-southern_english_female-low.onnx
+```
 
 Output structure:
 
@@ -135,14 +153,27 @@ out/output/
 ### Review and re-render a chunk
 
 ```bash
-bookforge review out/output 53
+bookforge review out/my-audiobook 53
 ```
 
 To override chunk text:
 
 ```bash
-bookforge review out/output 53 --new-text "Corrected text here"
+bookforge review out/my-audiobook 53 --new-text "Corrected text here"
 ```
+
+### Launch the Streamlit UI
+
+For a graphical interface to review audiobooks:
+
+```bash
+streamlit run src/bookforge/ui.py
+```
+
+This opens `http://localhost:8501` with:
+- **📚 Full Book tab**: Listen to complete synthesized audiobook
+- **📖 Chapters tab**: Explore individual chapters
+- **🎵 Chunks tab**: Review and evaluate specific chunks with text overlay
 
 ## Command Reference
 
@@ -153,8 +184,13 @@ bookforge process INPUT_FILE OUTPUT_DIR [OPTIONS]
 ```
 
 **Options:**
-- `--voice-model, -m PATH` – Path to Piper ONNX model file (required)
+- `--backend TEXT` – TTS backend: `piper` or `xtts` (default: `piper`)
+- `--voice-model, -m PATH` – Path to Piper ONNX model file (required for Piper backend)
+- `--speaker-wav PATH` – Reference WAV for XTTS voice cloning (optional for XTTS)
 - `--preset TEXT` – Voice preset name (default: `calm_longform`)
+- `--chapter-strategy TEXT` – Chapter detection: `auto`, `markdown`, `structured`, `heuristic`, `paragraph`, `none` (default: `auto`)
+- `--normalize` – Apply loudness normalization (EBU R128 standard)
+- `--target-lufs FLOAT` – Target loudness in LUFS (default: -16.0 for audiobooks)
 - `--skip-first-chunks INT` – Number of initial chunks to skip when concatenating (default: 0)
 
 ### `bookforge review`
@@ -190,6 +226,16 @@ bookforge/
 
 ## Troubleshooting
 
+### Windows Command Syntax Error
+
+**Problem:** `Got unexpected extra argument (\)`  
+**Cause:** Using Linux/Mac line continuation (`\`) on Windows  
+**Solution:** Use `^` for line continuation on Windows, or use a single-line command:
+
+```batch
+bookforge process books/test.txt out/my-audiobook --backend piper --voice-model voices/en_GB-southern_english_female-low.onnx
+```
+
 ### `ModuleNotFoundError: No module named 'pathvalidate'`
 
 ```bash
@@ -209,7 +255,11 @@ Check:
 
 ### `RuntimeError: Piper failed: ...`
 
-Check the error message in the traceback. If it mentions "surrogates not allowed", the input text has encoding issues. BookForge will skip the problematic chunk and log it to `out/debug/`.
+Check the error message in the traceback. If it mentions "surrogates not allowed", the input text has encoding issues. BookForge will skip the problematic chunk and log it.
+
+### Streamlit "No 'out/' directory found"
+
+You must run `bookforge process` first to create a project before launching the Streamlit UI.
 
 ## License
 

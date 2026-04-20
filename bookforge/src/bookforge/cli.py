@@ -3,24 +3,43 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Optional, List, Dict
+from typing import Any, Dict, List, Optional
 
 import typer
 
-from .config import PresetConfig
-from .project import BookProject
-from .ingest.txt_ingest import load_txt, BookText as TxtBookText
-from .process.cleaner import clean_text
-from .process.chunker import chunk_chapter, Chunk
 from .audio.concat import concat_wavs
+from .config import PresetConfig
+from .ingest.txt_ingest import BookText as TxtBookText
+from .ingest.txt_ingest import load_txt
+from .process.chunker import Chunk, chunk_chapter
+from .process.cleaner import clean_text
+from .project import BookProject
 from .tts.piper import PiperBackend
 from .tts.xtts import XTTSBackend
+
+
+def get_backend(
+    backend_type: str, 
+    voice_model: Optional[Path] = None, 
+    speaker_wav: Optional[Path] = None
+):
+    """Factory to instantiate the correct TTS backend."""
+    if backend_type == "piper":
+        if voice_model is None:
+            raise typer.BadParameter(
+                "You must provide --voice-model when using backend 'piper'."
+            )
+        return PiperBackend(str(voice_model))
+    elif backend_type == "xtts":
+        return XTTSBackend(speaker_wav=speaker_wav)
+    else:
+        raise typer.BadParameter(f"Unknown backend: {backend_type}")
 
 app = typer.Typer(help="Convert texts/epubs into audiobooks using local TTS.")
 
 
 def _rebuild_audio_from_index(
-    project: BookProject,
+    project: "BookProject",
     index: List[Dict[str, object]],
     skip_first_chunks: int = 0,
 ) -> None:
@@ -118,10 +137,10 @@ def process(
         "--normalize",
         help="Apply loudness normalization to final book.wav (EBU R128 standard).",
     ),
-    target_lufs: float = typer.Option(
-        -16.0,
-        "--target-lufs",
-        help="Target loudness in LUFS for normalization (default: -16.0 for audiobooks).",
+    incremental: bool = typer.Option(
+        False,
+        "--incremental",
+        help="Use incremental processing (for UI/resumable processing)",
     ),
 ) -> None:
     """Process INPUT_FILE into an audiobook under OUTPUT_DIR (TXT only for now)."""
@@ -132,101 +151,132 @@ def process(
     project = BookProject(output_dir)
     config = PresetConfig.load(preset)
 
-    # Choose TTS backend
-    if backend == "piper":
-        if voice_model is None:
-            raise typer.BadParameter(
-                "You must provide --voice-model when using backend 'piper'."
-            )
-        tts_backend = PiperBackend(str(voice_model))
-    elif backend == "xtts":
-        tts_backend = XTTSBackend(speaker_wav=speaker_wav)
+    tts_backend = get_backend(backend, voice_model, speaker_wav)
+
+    if incremental:
+        # Use incremental processor
+        from .incremental_processor import IncrementalProcessor
+
+        typer.echo("Using incremental processing mode...")
+        processor = IncrementalProcessor(
+            input_file=input_file,
+            output_dir=output_dir,
+            backend=tts_backend,
+            preset=preset,
+            chapter_strategy=chapter_strategy,
+            chapter_min_confidence=chapter_min_confidence,
+            normalize=normalize,
+            target_lufs=target_lufs,
+        )
+
+        # Stage 1: Prepare text
+        typer.echo("📝 Preparing text...")
+        processor.prepare_text()
+        progress = processor.get_progress()
+        typer.echo(f"   Found {progress.total_chapters} chapters")
+
+        # Stage 2: Process chapters
+        typer.echo("🎵 Processing chapters incrementally...")
+        while not processor.is_complete():
+            processor.process_next_chapter()
+            progress = processor.get_progress()
+            typer.echo(f"   Chapter {progress.current_chapter}/{progress.total_chapters}: "
+                      f"{progress.status_message}")
+
+        # Stage 3: Finalize
+        typer.echo("🎉 Finalizing book...")
+        processor.finalize_book()
+        typer.echo("✅ Incremental processing complete!")
+
     else:
-        raise typer.BadParameter(f"Unknown backend: {backend}")
+        # Original monolithic processing
+        typer.echo(f"Loading text from {input_file} ...")
+        
+        # 1. Ingest
+        book: TxtBookText = load_txt(
+            input_file,
+            chapter_strategy=chapter_strategy,
+            min_confidence=chapter_min_confidence,
+        )
 
-    typer.echo(f"Loading text from {input_file} ...")
-    # Pass chapter detection options to loader
-    book: TxtBookText = load_txt(
-        input_file,
-        chapter_strategy=chapter_strategy,
-        min_confidence=chapter_min_confidence,
-    )
+        typer.echo(f"Title: {book.title}")
+        typer.echo(f"Chapters: {len(book.chapters)}")
 
-    typer.echo(f"Title: {book.title}")
-    typer.echo(f"Chapters: {len(book.chapters)}")
+        # Report detected chapter titles
+        if book.chapter_titles:
+            typer.echo("\nDetected chapters:")
+            for i, title in enumerate(book.chapter_titles[:10]):  # Show first 10
+                typer.echo(f"  {i + 1}. {title}")
+            if len(book.chapter_titles) > 10:
+                typer.echo(f"  ... and {len(book.chapter_titles) - 10} more")
+            typer.echo("")
 
-    # Report detected chapter titles
-    if book.chapter_titles:
-        typer.echo("\nDetected chapters:")
-        for i, title in enumerate(book.chapter_titles[:10]):  # Show first 10
-            typer.echo(f"  {i + 1}. {title}")
-        if len(book.chapter_titles) > 10:
-            typer.echo(f"  ... and {len(book.chapter_titles) - 10} more")
-        typer.echo("")
+        all_chunk_meta: List[Dict[str, object]] = []
+        chunk_id = 0
 
-    all_chunk_meta: List[Dict[str, object]] = []
-    chunk_id = 0
+        for chapter_index, chapter_text in enumerate(book.chapters):
+            typer.echo(f"Cleaning chapter {chapter_index + 1} ...")
+            cleaned = clean_text(chapter_text)
 
-    for chapter_index, chapter_text in enumerate(book.chapters):
-        typer.echo(f"Cleaning chapter {chapter_index + 1} ...")
-        cleaned = clean_text(chapter_text)
+            typer.echo(f"Chunking chapter {chapter_index + 1} ...")
+            chunks = chunk_chapter(cleaned, config, chapter_index, starting_chunk_id=chunk_id)
+            if not chunks:
+                continue
+            chunk_id = chunks[-1].id + 1
 
-        typer.echo(f"Chunking chapter {chapter_index + 1} ...")
-        chunks = chunk_chapter(cleaned, config, chapter_index, starting_chunk_id=chunk_id)
-        if not chunks:
-            continue
-        chunk_id = chunks[-1].id + 1
+            for chunk in chunks:
+                out_wav = project.chunks_dir / f"chunk_{chunk.id:05d}.wav"
+                typer.echo(
+                    f"  Synthesizing chunk {chunk.id} (chapter {chapter_index + 1}) "
+                    f"→ {out_wav.name}"
+                )
+                tts_backend.synthesize_chunk(chunk, config, out_wav)
+                all_chunk_meta.append(chunk.to_dict())
 
-        for chunk in chunks:
-            out_wav = project.chunks_dir / f"chunk_{chunk.id:05d}.wav"
-            typer.echo(
-                f"  Synthesizing chunk {chunk.id} (chapter {chapter_index + 1}) "
-                f"→ {out_wav.name}"
-            )
-            tts_backend.synthesize_chunk(chunk, config, out_wav)
-            all_chunk_meta.append(chunk.to_dict())
+        # Save project index
+        project.save_index(all_chunk_meta)
+        typer.echo(
+            f"Saved project index with {len(all_chunk_meta)} chunks to {project.index_path}"
+        )
 
-    # Save project index
-    project.save_index(all_chunk_meta)
-    typer.echo(
-        f"Saved project index with {len(all_chunk_meta)} chunks to {project.index_path}"
-    )
+        # Save simple metadata (including source file path for review)
+        project.save_meta(
+            {
+                "backend": backend,
+                "source_file": str(input_file.resolve()),
+                "preset": preset,
+                "voice_model": str(voice_model) if voice_model else None,
+                "speaker_wav": str(speaker_wav) if speaker_wav else None,
+                "chapter_strategy": chapter_strategy,
+                "chapter_min_confidence": chapter_min_confidence,
+                "version": "1.1.0",
+            }
+        )
 
-    # Save simple metadata (including source file path for review)
-    project.save_meta(
-        {
-            "source_file": str(input_file.resolve()),
-            "preset": preset,
-            "voice_model": str(voice_model),
-            "chapter_strategy": chapter_strategy,
-            "chapter_min_confidence": chapter_min_confidence,
-        }
-    )
+        # Build per-chapter WAVs and book.wav from the index
+        if not all_chunk_meta:
+            typer.echo("No chunks generated; nothing to concatenate.")
+            return
 
-    # Build per-chapter WAVs and book.wav from the index
-    if not all_chunk_meta:
-        typer.echo("No chunks generated; nothing to concatenate.")
-        return
+        _rebuild_audio_from_index(project, all_chunk_meta, skip_first_chunks=skip_first_chunks)
+        typer.echo(f"  - {len(all_chunk_meta)} chunk WAVs in {project.chunks_dir}")
 
-    _rebuild_audio_from_index(project, all_chunk_meta, skip_first_chunks=skip_first_chunks)
-    typer.echo(f"  - {len(all_chunk_meta)} chunk WAVs in {project.chunks_dir}")
+        # Apply normalization if requested
+        if normalize:
+            book_wav = output_dir / "book.wav"
+            if book_wav.exists():
+                typer.echo(f"\nNormalizing audio to {target_lufs} LUFS ...")
+                normalized_wav = output_dir / "book_normalized.wav"
 
-    # Apply normalization if requested
-    if normalize:
-        book_wav = output_dir / "book.wav"
-        if book_wav.exists():
-            typer.echo(f"\nNormalizing audio to {target_lufs} LUFS ...")
-            normalized_wav = output_dir / "book_normalized.wav"
+                from .audio.normalise import normalize_audio
+                normalize_audio(book_wav, normalized_wav, target_lufs=target_lufs)
 
-            from .audio.normalise import normalize_audio
-            normalize_audio(book_wav, normalized_wav, target_lufs=target_lufs)
-
-            # Replace original with normalized version
-            book_wav.unlink()
-            normalized_wav.rename(book_wav)
-            typer.echo(f"✓ Normalized {book_wav}")
-        else:
-            typer.echo("Warning: book.wav not found, skipping normalization.")
+                # Replace original with normalized version
+                book_wav.unlink()
+                normalized_wav.rename(book_wav)
+                typer.echo(f"✓ Normalized {book_wav}")
+            else:
+                typer.echo("Warning: book.wav not found, skipping normalization.")
 
 
 @app.command()
@@ -271,9 +321,16 @@ def review(
 
     chapter_idx = int(chunk_meta["chapter_index"])
 
-    # Re-ingest and re-chunk to get the text for this chunk
+    # Re-ingest using originally stored strategy for consistency
     typer.echo(f"Reloading source text from {source_file} ...")
-    book: TxtBookText = load_txt(source_file)
+    chapter_strategy = meta.get("chapter_strategy", "auto")
+    min_confidence = float(meta.get("chapter_min_confidence", 0.5))
+    
+    book: TxtBookText = load_txt(
+        source_file, 
+        chapter_strategy=chapter_strategy, 
+        min_confidence=min_confidence
+    )
 
     if chapter_idx >= len(book.chapters):
         raise typer.BadParameter(
@@ -319,17 +376,16 @@ def review(
     )
 
     # Re-synthesise this chunk
-    voice_model_str = meta.get("voice_model")
-    if not voice_model_str:
-        raise typer.BadParameter(
-            f"No voice_model recorded in {project.meta_path}; "
-            "re-run process to create meta.json."
-        )
+    backend_type = meta.get("backend", "piper")
+    voice_model = Path(meta["voice_model"]) if meta.get("voice_model") else None
+    speaker_wav = Path(meta["speaker_wav"]) if meta.get("speaker_wav") else None
+    
+    typer.echo(f"Instantiating {backend_type} backend for re-synthesis...")
+    tts_backend = get_backend(backend_type, voice_model, speaker_wav)
 
-    backend = PiperBackend(voice_model_str)
     out_wav = project.chunks_dir / f"chunk_{updated_chunk.id:05d}.wav"
     typer.echo(f"Re-synthesising chunk {updated_chunk.id} → {out_wav} ...")
-    backend.synthesize_chunk(updated_chunk, config, out_wav)
+    tts_backend.synthesize_chunk(updated_chunk, config, out_wav)
 
     # Rebuild chapter WAV(s) and book.wav
     typer.echo("Rebuilding chapter and book audio after chunk update ...")
@@ -377,5 +433,7 @@ def main() -> None:
     app()
 
 
+if __name__ == "__main__":
+    main()
 if __name__ == "__main__":
     main()

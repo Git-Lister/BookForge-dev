@@ -21,6 +21,8 @@ Requires-Dist: TTS>=0.22.0; extra == "xtts"
 Requires-Dist: torch>=2.0.0; extra == "xtts"
 Requires-Dist: torchaudio>=2.0.0; extra == "xtts"
 Requires-Dist: numpy<2.0.0; extra == "xtts"
+Provides-Extra: ui
+Requires-Dist: streamlit>=1.30.0; extra == "ui"
 Provides-Extra: dev
 Requires-Dist: pytest>=8.0; extra == "dev"
 Requires-Dist: pytest-cov>=5.0; extra == "dev"
@@ -35,11 +37,11 @@ Dynamic: license-file
 ```markdown
 # BookForge
 
-Convert text files into audiobooks using local TTS (Piper).
+Convert text files into audiobooks using local TTS (Piper or XTTS).
 
 ## Requirements
 
-- Python 3.10+
+- Python 3.13+
 - ffmpeg (for audio concatenation)
 - ~2GB disk space for voice models
 
@@ -55,7 +57,7 @@ cd BookForge-dev/bookforge
 ### 2. Create and activate virtual environment
 
 ```bash
-python -m venv .venv
+python -m venv .venv --upgrade-deps
 ```
 
 **Windows:**

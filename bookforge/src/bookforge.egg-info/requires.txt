@@ -19,6 +19,9 @@ piper-tts>=1.2.0
 onnxruntime>=1.18.0
 pathvalidate>=3.0.0
 
+[ui]
+streamlit>=1.30.0
+
 [xtts]
 TTS>=0.22.0
 torch>=2.0.0

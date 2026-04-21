@@ -5,12 +5,13 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Optional
 
-from TTS.api import TTS  # Coqui TTS
+import torch
+from TTS.api import TTS  # coqui-tts
 
-from .backend import TTSBackend
 from ..config import PresetConfig
 from ..process.chunker import Chunk
 from ..process.sanitize import sanitise_for_tts
+from .backend import TTSBackend
 
 
 class XTTSBackend(TTSBackend):
@@ -23,11 +24,31 @@ class XTTSBackend(TTSBackend):
         speaker_wav: Optional[Path] = None,
         language: str = "en",
     ) -> None:
-        self.tts = TTS(model_name, gpu=gpu)
-        self.speaker_wav = str(speaker_wav) if speaker_wav else None
-        self.language = language
+        # Decide device based on flag + availability
+        if gpu:
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+        else:
+            device = "cpu"
 
-    def synthesize_chunk(self, chunk: Chunk, config: PresetConfig, out_path: Path) -> None:
+        self._device = device
+        self._model_name = model_name
+        self._speaker_wav = str(speaker_wav) if speaker_wav else None
+        self._language = language
+
+        # Initialise coqui-tts model on chosen device
+        # Note: in newer coqui-tts versions, .to(device) is the canonical way.
+        self.tts = TTS(model_name).to(device)
+
+    @property
+    def device(self) -> str:
+        return self._device
+
+    def synthesize_chunk(
+        self,
+        chunk: Chunk,
+        config: PresetConfig,
+        out_path: Path,
+    ) -> None:
         out_path.parent.mkdir(parents=True, exist_ok=True)
 
         safe_text = sanitise_for_tts(chunk.text)
@@ -36,10 +57,10 @@ class XTTSBackend(TTSBackend):
             "text": safe_text,
             "file_path": str(out_path),
         }
-        if self.speaker_wav:
-            kwargs["speaker_wav"] = self.speaker_wav
-        if self.language:
-            kwargs["language"] = self.language
+        if self._speaker_wav:
+            kwargs["speaker_wav"] = self._speaker_wav
+        if self._language:
+            kwargs["language"] = self._language
 
         # XTTS handles prosody; we don't currently map config.rate
         self.tts.tts_to_file(**kwargs)

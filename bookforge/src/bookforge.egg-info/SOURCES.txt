@@ -6,6 +6,7 @@ src/bookforge/__init__.py
 src/bookforge/backend.py
 src/bookforge/cli.py
 src/bookforge/config.py
+src/bookforge/incremental_processor.py
 src/bookforge/project.py
 src/bookforge/ui.py
 src/bookforge/xtts.py

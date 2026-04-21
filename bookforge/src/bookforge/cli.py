@@ -14,34 +14,9 @@ from .ingest.txt_ingest import load_txt
 from .process.chunker import Chunk, chunk_chapter
 from .process.cleaner import clean_text
 from .project import BookProject
-from .tts.backend import TTSBackend
-from .tts.piper import PiperBackend
-from .tts.xtts import XTTSBackend
+from .tts.factory import get_backend
 
 app = typer.Typer(help="Convert texts/epubs into audiobooks using local TTS.")
-
-
-def get_backend(
-    backend_type: str,
-    voice_model: Optional[Path] = None,
-    speaker_wav: Optional[Path] = None,
-) -> TTSBackend:
-    """Factory to instantiate the correct TTS backend."""
-    if backend_type == "piper":
-        if voice_model is None:
-            raise typer.BadParameter(
-                "You must provide --voice-model when using backend 'piper'."
-            )
-        return PiperBackend(str(voice_model))
-
-    if backend_type == "xtts":
-        return XTTSBackend(
-            speaker_wav=speaker_wav,
-            language="en",
-            gpu=True,
-        )
-
-    raise typer.BadParameter(f"Unknown backend: {backend_type}")
 
 
 def _rebuild_audio_from_index(
@@ -162,7 +137,12 @@ def process(
     project = BookProject(output_dir)
     config = PresetConfig.load(preset)
 
-    tts_backend = get_backend(backend, voice_model, speaker_wav)
+    # Shared backend factory
+    tts_backend = get_backend(
+        backend_type=backend,
+        voice_model=voice_model,
+        speaker_wav=speaker_wav,
+    )
 
     if incremental:
         from .incremental_processor import IncrementalProcessor
@@ -389,7 +369,11 @@ def review(
     speaker_wav = Path(meta["speaker_wav"]) if meta.get("speaker_wav") else None
 
     typer.echo(f"Instantiating {backend_type} backend for re-synthesis...")
-    tts_backend = get_backend(backend_type, voice_model, speaker_wav)
+    tts_backend = get_backend(
+        backend_type=backend_type,
+        voice_model=voice_model,
+        speaker_wav=speaker_wav,
+    )
 
     out_wav = project.chunks_dir / f"chunk_{updated_chunk.id:05d}.wav"
     typer.echo(f"Re-synthesising chunk {updated_chunk.id} → {out_wav} ...")

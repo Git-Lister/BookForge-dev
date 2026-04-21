@@ -1,446 +1,525 @@
-"""Streamlit-based local UI for BookForge project review and processing."""
+"""Streamlit UI for BookForge with a staged processing workflow."""
 
-import json
-import threading
-import time
+from __future__ import annotations
+
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 import streamlit as st
 
-from bookforge.cli import get_backend
 from bookforge.incremental_processor import IncrementalProcessor
 from bookforge.project import BookProject
+from bookforge.tts.factory import get_backend
 
-st.set_page_config(page_title="BookForge Laboratory", layout="wide")
+st.set_page_config(page_title="BookForge Studio", layout="wide")
 
-st.title("🔨 BookForge Studio")
-st.markdown("Create and review audiobooks with local TTS.")
 
-# Main navigation
-main_tab_process, main_tab_review = st.tabs(["⚡ Process New Book", "🎧 Review Projects"])
+def init_state() -> None:
+    defaults: dict[str, Any] = {
+        "workflow_stage": "setup",
+        "processor": None,
+        "current_project_dir": None,
+        "current_input_file": None,
+        "config_saved": False,
+        "job_error": None,
+        "job_message": "",
+        "uploaded_input_path": None,
+        "uploaded_speaker_wav_path": None,
+        "selected_project": None,
+    }
+    for key, value in defaults.items():
+        if key not in st.session_state:
+            st.session_state[key] = value
 
-# Global state for processing
-if 'processor' not in st.session_state:
+
+def books_dir() -> Path:
+    return Path("books")
+
+
+def voices_dir() -> Path:
+    return Path("voices")
+
+
+def out_dir() -> Path:
+    return Path("out")
+
+
+def temp_dir() -> Path:
+    path = Path("temp")
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def available_books() -> list[Path]:
+    d = books_dir()
+    if not d.exists():
+        return []
+    return sorted(d.glob("*.txt"))
+
+
+def available_voices() -> list[Path]:
+    d = voices_dir()
+    if not d.exists():
+        return []
+    return sorted(d.glob("*.onnx"))
+
+
+def available_projects() -> list[Path]:
+    d = out_dir()
+    if not d.exists():
+        return []
+    return sorted([p for p in d.iterdir() if p.is_dir()])
+
+
+def save_uploaded_file(uploaded_file, prefix: str) -> Path:
+    destination = temp_dir() / f"{prefix}_{uploaded_file.name}"
+    with destination.open("wb") as f:
+        f.write(uploaded_file.getvalue())
+    return destination
+
+
+def reset_workflow(keep_project_selection: bool = True) -> None:
+    selected_project = st.session_state.selected_project if keep_project_selection else None
+    st.session_state.workflow_stage = "setup"
     st.session_state.processor = None
-if 'processing_active' not in st.session_state:
-    st.session_state.processing_active = False
-if 'last_progress' not in st.session_state:
-    st.session_state.last_progress = None
+    st.session_state.current_project_dir = None
+    st.session_state.current_input_file = None
+    st.session_state.config_saved = False
+    st.session_state.job_error = None
+    st.session_state.job_message = ""
+    st.session_state.uploaded_input_path = None
+    st.session_state.uploaded_speaker_wav_path = None
+    st.session_state.selected_project = selected_project
 
-with main_tab_process:
-    st.header("📝 Process New Book")
-    st.write("Convert a text file into an audiobook with real-time progress tracking.")
 
-    # Input configuration
-    col1, col2 = st.columns(2)
+def stage_badge(stage: str) -> str:
+    mapping = {
+        "setup": "1. Setup",
+        "prepared": "2. Prepared",
+        "processing": "3. Processing",
+        "complete": "4. Complete",
+        "error": "Error",
+    }
+    return mapping.get(stage, stage.title())
 
-    with col1:
-        st.subheader("📁 Input File")
-        books_dir = Path("books")
-        if books_dir.exists():
-            available_books = [f.name for f in books_dir.glob("*.txt")]
-            if available_books:
-                selected_book = st.selectbox(
-                    "Select book from books/ directory:",
-                    available_books,
-                    help="Choose a .txt file from the books/ directory"
-                )
-                input_file = books_dir / selected_book
-            else:
-                st.warning("No .txt files found in books/ directory")
-                input_file = None
-        else:
-            st.error("books/ directory not found")
-            input_file = None
 
-        # Alternative: file upload
-        uploaded_file = st.file_uploader(
-            "Or upload a text file:",
-            type=['txt'],
-            help="Upload a .txt file directly"
-        )
-        if uploaded_file:
-            # Save uploaded file temporarily
-            temp_dir = Path("temp")
-            temp_dir.mkdir(exist_ok=True)
-            input_file = temp_dir / uploaded_file.name
-            with input_file.open('wb') as f:
-                f.write(uploaded_file.getvalue())
+def get_selected_input_file(selected_book_name: Optional[str], uploaded_file) -> Optional[Path]:
+    if uploaded_file is not None:
+        uploaded_path = save_uploaded_file(uploaded_file, "input")
+        st.session_state.uploaded_input_path = uploaded_path
+        return uploaded_path
 
-    with col2:
-        st.subheader("🎵 TTS Configuration")
+    if selected_book_name:
+        candidate = books_dir() / selected_book_name
+        if candidate.exists():
+            return candidate
 
-        # Backend selection
-        backend = st.radio(
-            "TTS Backend:",
-            ["piper", "xtts"],
-            help="Piper: Fast, lightweight. XTTS: Advanced voice cloning"
-        )
+    return None
 
-        # Voice model selection (for Piper)
-        if backend == "piper":
-            voices_dir = Path("voices")
-            if voices_dir.exists():
-                onnx_files = [f.name for f in voices_dir.glob("*.onnx")]
-                if onnx_files:
-                    voice_model_name = st.selectbox(
-                        "Voice Model:",
-                        onnx_files,
-                        help="Select a Piper voice model (.onnx file)"
-                    )
-                    voice_model = voices_dir / voice_model_name
-                else:
-                    st.error("No .onnx voice models found in voices/ directory")
-                    voice_model = None
-            else:
-                st.error("voices/ directory not found")
-                voice_model = None
-        else:
-            voice_model = None
 
-        # Speaker WAV for XTTS
-        if backend == "xtts":
-            speaker_wav = st.file_uploader(
-                "Reference voice (optional):",
-                type=['wav'],
-                help="Upload a short WAV sample for voice cloning"
+def get_selected_speaker_wav(uploaded_wav) -> Optional[Path]:
+    if uploaded_wav is None:
+        return None
+    wav_path = save_uploaded_file(uploaded_wav, "speaker")
+    st.session_state.uploaded_speaker_wav_path = wav_path
+    return wav_path
+
+
+def render_header() -> None:
+    st.title("🔨 BookForge Studio")
+    st.caption("Step-by-step audiobook creation with local TTS backends.")
+
+
+def render_sidebar() -> None:
+    st.sidebar.header("Workflow")
+    st.sidebar.metric("Current stage", stage_badge(st.session_state.workflow_stage))
+
+    if st.session_state.current_project_dir:
+        st.sidebar.caption(f"Project: {st.session_state.current_project_dir}")
+
+    if st.session_state.job_message:
+        st.sidebar.info(st.session_state.job_message)
+
+    if st.session_state.job_error:
+        st.sidebar.error(st.session_state.job_error)
+
+    st.sidebar.divider()
+
+    if st.sidebar.button("Reset workflow", use_container_width=True):
+        reset_workflow()
+        st.rerun()
+
+
+def render_setup_tab() -> None:
+    st.subheader("Setup")
+    st.write("Choose your input, backend, and output settings, then save the configuration.")
+
+    local_books = available_books()
+    local_voices = available_voices()
+
+    with st.form("setup_form", clear_on_submit=False):
+        col1, col2 = st.columns(2)
+
+        with col1:
+            st.markdown("### Source")
+            selected_book_name = st.selectbox(
+                "Book from books/",
+                options=[""] + [p.name for p in local_books],
+                help="Pick a local .txt file from the books directory.",
             )
-            if speaker_wav:
-                temp_dir = Path("temp")
-                temp_dir.mkdir(exist_ok=True)
-                speaker_wav_path = temp_dir / speaker_wav.name
-                with speaker_wav_path.open('wb') as f:
-                    f.write(speaker_wav.getvalue())
+            uploaded_book = st.file_uploader(
+                "Or upload a .txt file",
+                type=["txt"],
+                help="Uploaded files are copied to a temporary folder for processing.",
+            )
+
+            output_name = st.text_input(
+                "Output project name",
+                value="my-audiobook",
+                help="This creates/uses out/<project-name>.",
+            ).strip()
+
+        with col2:
+            st.markdown("### Voice")
+            backend = st.radio(
+                "Backend",
+                options=["piper", "xtts"],
+                horizontal=True,
+            )
+
+            voice_model_name: Optional[str] = None
+            if backend == "piper":
+                voice_model_name = st.selectbox(
+                    "Piper voice model",
+                    options=[""] + [p.name for p in local_voices],
+                    help="Select an ONNX model from voices/.",
+                )
+                uploaded_speaker_wav = None
             else:
-                speaker_wav_path = None
-        else:
+                uploaded_speaker_wav = st.file_uploader(
+                    "Reference voice WAV (optional)",
+                    type=["wav"],
+                    help="Optional XTTS speaker reference.",
+                )
+
+            preset = st.selectbox(
+                "Preset",
+                options=["calm_longform", "calm_longform_v2"],
+                index=0,
+            )
+
+            chapter_strategy = st.selectbox(
+                "Chapter detection",
+                options=["auto", "markdown", "structured", "heuristic", "paragraph", "none"],
+                index=0,
+            )
+
+            chapter_min_confidence = st.slider(
+                "Chapter confidence",
+                min_value=0.0,
+                max_value=1.0,
+                value=0.5,
+                step=0.05,
+            )
+
+            normalize = st.checkbox("Normalize final book", value=False)
+            target_lufs = st.number_input(
+                "Target LUFS",
+                value=-16.0,
+                step=0.5,
+                format="%.1f",
+                disabled=not normalize,
+            )
+
+        submitted = st.form_submit_button("Save configuration", use_container_width=True)
+
+    if submitted:
+        try:
+            input_file = get_selected_input_file(selected_book_name or None, uploaded_book)
+            if input_file is None:
+                raise ValueError("Select a local book or upload a .txt file.")
+
+            if not output_name:
+                raise ValueError("Please provide an output project name.")
+
+            voice_model = None
             speaker_wav_path = None
 
-        # Output directory
-        output_name = st.text_input(
-            "Output Project Name:",
-            value="my-audiobook",
-            help="Name for the output directory in out/"
-        )
-        output_dir = Path("out") / output_name
+            if backend == "piper":
+                if not voice_model_name:
+                    raise ValueError("Please select a Piper voice model.")
+                voice_model = voices_dir() / voice_model_name
+                if not voice_model.exists():
+                    raise ValueError(f"Voice model not found: {voice_model}")
+            else:
+                speaker_wav_path = get_selected_speaker_wav(uploaded_speaker_wav)
 
-        # Advanced options
-        with st.expander("⚙️ Advanced Options"):
-            preset = st.selectbox(
-                "Voice Preset:",
-                ["calm_longform", "calm_longform_v2"],
-                help="Voice configuration preset"
-            )
-            chapter_strategy = st.selectbox(
-                "Chapter Detection:",
-                ["auto", "markdown", "structured", "heuristic", "paragraph", "none"],
-                help="How to detect chapter breaks"
-            )
-            normalize = st.checkbox(
-                "Apply Audio Normalization",
-                value=False,
-                help="Normalize loudness to -16 LUFS (audiobook standard)"
+            config = {
+                "input_file": input_file,
+                "output_dir": out_dir() / output_name,
+                "backend": backend,
+                "voice_model": voice_model,
+                "speaker_wav": speaker_wav_path,
+                "preset": preset,
+                "chapter_strategy": chapter_strategy,
+                "chapter_min_confidence": chapter_min_confidence,
+                "normalize": normalize,
+                "target_lufs": target_lufs,
+            }
+
+            tts_backend = get_backend(
+                backend_type=backend,
+                voice_model=voice_model,
+                speaker_wav=speaker_wav_path,
             )
 
-    # Processing controls
-    st.divider()
+            processor = IncrementalProcessor(
+                input_file=config["input_file"],
+                output_dir=config["output_dir"],
+                backend=tts_backend,
+                preset=config["preset"],
+                chapter_strategy=config["chapter_strategy"],
+                chapter_min_confidence=config["chapter_min_confidence"],
+                normalize=config["normalize"],
+                target_lufs=config["target_lufs"],
+            )
 
-    # Check if we can start processing
-    can_start = (
-        input_file is not None and
-        output_dir is not None and
-        (backend == "xtts" or (backend == "piper" and voice_model is not None))
+            st.session_state.processor = processor
+            st.session_state.current_input_file = str(config["input_file"])
+            st.session_state.current_project_dir = str(config["output_dir"])
+            st.session_state.config_saved = True
+            st.session_state.workflow_stage = "setup"
+            st.session_state.job_error = None
+            st.session_state.job_message = "Configuration saved. Ready to prepare the book."
+            st.success("Configuration saved.")
+            st.rerun()
+
+        except Exception as e:
+            st.session_state.job_error = str(e)
+            st.error(f"Failed to save configuration: {e}")
+
+    if st.session_state.config_saved and st.session_state.current_project_dir:
+        st.info(f"Ready to work on: `{st.session_state.current_project_dir}`")
+
+
+def render_progress_metrics() -> None:
+    processor = st.session_state.processor
+    if processor is None:
+        st.info("No active workflow yet. Save configuration in Setup first.")
+        return
+
+    progress = processor.get_progress()
+
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric("Stage", str(progress.stage).replace("_", " ").title())
+    col2.metric("Chapter", f"{progress.current_chapter}/{progress.total_chapters}")
+    col3.metric("Chunk", f"{progress.current_chunk}/{progress.total_chunks}")
+    col4.metric("Overall", f"{progress.overall_progress:.1%}")
+
+    st.progress(progress.overall_progress)
+    st.caption(progress.status_message)
+
+    col5, col6 = st.columns(2)
+    col5.info(f"Elapsed: {progress.elapsed_time}")
+    col6.info(f"ETA: {progress.estimated_time_remaining}")
+
+
+def render_workflow_tab() -> None:
+    st.subheader("Workflow")
+
+    if st.session_state.processor is None:
+        st.info("Start in the Setup tab to create a processor.")
+        return
+
+    render_progress_metrics()
+
+    st.markdown("### Actions")
+    col1, col2, col3 = st.columns(3)
+
+    with col1:
+        if st.button("Prepare book", use_container_width=True):
+            try:
+                st.session_state.processor.prepare_text()
+                st.session_state.workflow_stage = "prepared"
+                st.session_state.job_error = None
+                st.session_state.job_message = "Book prepared. Chapters are ready for synthesis."
+                st.success("Preparation complete.")
+                st.rerun()
+            except Exception as e:
+                st.session_state.workflow_stage = "error"
+                st.session_state.job_error = str(e)
+                st.error(f"Preparation failed: {e}")
+
+    with col2:
+        if st.button("Process next chapter", use_container_width=True):
+            try:
+                st.session_state.processor.process_next_chapter()
+                st.session_state.workflow_stage = (
+                    "complete" if st.session_state.processor.is_complete() else "processing"
+                )
+                st.session_state.job_error = None
+                st.session_state.job_message = "Processed one chapter."
+                st.success("Processed next chapter.")
+                st.rerun()
+            except Exception as e:
+                st.session_state.workflow_stage = "error"
+                st.session_state.job_error = str(e)
+                st.error(f"Chapter processing failed: {e}")
+
+    with col3:
+        if st.button("Finalize book", use_container_width=True):
+            try:
+                st.session_state.processor.finalize_book()
+                st.session_state.workflow_stage = "complete"
+                st.session_state.job_error = None
+                st.session_state.job_message = "Book finalized successfully."
+                st.success("Finalization complete.")
+                st.rerun()
+            except Exception as e:
+                st.session_state.workflow_stage = "error"
+                st.session_state.job_error = str(e)
+                st.error(f"Finalization failed: {e}")
+
+    st.markdown("### Bulk processing")
+    if st.button("Process all remaining chapters", type="primary", use_container_width=True):
+        try:
+            while not st.session_state.processor.is_complete():
+                st.session_state.processor.process_next_chapter()
+            st.session_state.workflow_stage = "complete"
+            st.session_state.job_error = None
+            st.session_state.job_message = "All chapters processed. You can finalize or review outputs."
+            st.success("Finished processing all remaining chapters.")
+            st.rerun()
+        except Exception as e:
+            st.session_state.workflow_stage = "error"
+            st.session_state.job_error = str(e)
+            st.error(f"Bulk processing failed: {e}")
+
+
+def render_library_tab() -> None:
+    st.subheader("Library")
+
+    projects = available_projects()
+    if not projects:
+        st.info("No projects found in out/. Process a book first.")
+        return
+
+    project_names = [p.name for p in projects]
+    current_selection = st.session_state.selected_project
+    default_index = 0
+    if current_selection in project_names:
+        default_index = project_names.index(current_selection)
+
+    selected = st.selectbox("Projects", project_names, index=default_index)
+    st.session_state.selected_project = selected
+
+    project_path = out_dir() / selected
+    project = BookProject(project_path)
+    meta = project.load_meta()
+    index = project.load_index()
+
+    col1, col2, col3 = st.columns(3)
+    col1.metric("Chunks", len(index))
+    col2.metric("Backend", str(meta.get("backend", "unknown")) if meta else "unknown")
+    col3.metric("Preset", str(meta.get("preset", "unknown")) if meta else "unknown")
+
+    book_wav = project_path / "book.wav"
+    if book_wav.exists():
+        st.markdown("### Full book")
+        st.audio(str(book_wav), format="audio/wav")
+
+    chapter_files = sorted(project.chapters_dir.glob("*.wav"))
+    if chapter_files:
+        st.markdown("### Chapters")
+        for chapter_file in chapter_files:
+            with st.expander(chapter_file.name):
+                st.audio(str(chapter_file), format="audio/wav")
+
+    with st.expander("Project metadata"):
+        st.json(meta if meta else {})
+
+
+def render_review_tab() -> None:
+    st.subheader("Review")
+
+    projects = available_projects()
+    if not projects:
+        st.info("No projects available for review yet.")
+        return
+
+    project_names = [p.name for p in projects]
+    current_selection = st.session_state.selected_project
+    default_index = 0
+    if current_selection in project_names:
+        default_index = project_names.index(current_selection)
+
+    selected = st.selectbox("Review project", project_names, index=default_index, key="review_project")
+    st.session_state.selected_project = selected
+
+    project_path = out_dir() / selected
+    project = BookProject(project_path)
+    index = project.load_index()
+
+    if not index:
+        st.info("No chunk index found for this project yet.")
+        return
+
+    chapters = sorted(list({int(m["chapter_index"]) for m in index}))
+    selected_chapter = st.selectbox(
+        "Chapter",
+        chapters,
+        format_func=lambda x: f"Chapter {x + 1}",
     )
 
-    if not can_start:
-        st.warning("⚠️ Please complete the configuration above to start processing.")
-        st.stop()
+    chapter_chunks = [m for m in index if int(m["chapter_index"]) == selected_chapter]
+    st.caption(f"{len(chapter_chunks)} chunk(s) in this chapter.")
 
-    # Start/Stop/Resume processing
-    col_start, col_stop, col_reset = st.columns(3)
+    for meta in chapter_chunks:
+        chunk_id = int(meta["id"])
+        file_name = str(meta["file"])
+        wav_file = project.chunks_dir / file_name
+        text_value = str(meta.get("text", ""))
 
-    with col_start:
-        if st.button("🚀 Start Processing", type="primary", disabled=st.session_state.processing_active):
-            try:
-                # Initialize TTS backend
-                tts_backend = get_backend(backend, voice_model, speaker_wav_path)
-
-                # Initialize incremental processor
-                st.session_state.processor = IncrementalProcessor(
-                    input_file=input_file,
-                    output_dir=output_dir,
-                    backend=tts_backend,
-                    preset=preset,
-                    chapter_strategy=chapter_strategy,
-                    normalize=normalize,
-                )
-
-                st.session_state.processing_active = True
-                st.rerun()  # Trigger immediate update
-
-            except Exception as e:
-                st.error(f"❌ Failed to initialize processing: {e}")
-
-    with col_stop:
-        if st.button("⏹️ Stop Processing", disabled=not st.session_state.processing_active):
-            st.session_state.processing_active = False
-            st.info("Processing stopped. You can resume later.")
-
-    with col_reset:
-        if st.button("🔄 Reset", disabled=st.session_state.processing_active):
-            st.session_state.processor = None
-            st.session_state.processing_active = False
-            st.session_state.last_progress = None
-            st.success("Processing reset. Ready to start fresh.")
-
-    # Progress display
-    if st.session_state.processor:
-        progress = st.session_state.processor.get_progress()
-        st.session_state.last_progress = progress
-
-        # Progress overview
-        st.subheader("📊 Processing Progress")
-
-        col1, col2, col3 = st.columns(3)
+        col1, col2 = st.columns([1, 2])
         with col1:
-            st.metric("Stage", progress.stage.replace('_', ' ').title())
-        with col2:
-            st.metric("Chapter", f"{progress.current_chapter}/{progress.total_chapters}")
-        with col3:
-            st.metric("Overall", f"{progress.overall_progress:.1%}")
-
-        # Progress bars
-        st.progress(progress.overall_progress)
-        if progress.total_chapters > 0:
-            chapter_progress = progress.current_chapter / progress.total_chapters
-            st.progress(chapter_progress, text=f"Chapter {progress.current_chapter}/{progress.total_chapters}")
-
-        # Status and timing
-        col1, col2 = st.columns(2)
-        with col1:
-            st.info(f"⏱️ Elapsed: {progress.elapsed_time}")
-        with col2:
-            st.info(f"🎯 ETA: {progress.estimated_time_remaining}")
-
-        # Current status
-        st.success(f"📝 {progress.status_message}")
-
-        # Detailed chunk progress
-        if progress.current_chunk > 0 or progress.total_chunks > 0:
-            chunk_progress = progress.current_chunk / max(progress.total_chunks, 1)
-            st.progress(chunk_progress, text=f"Chunk {progress.current_chunk}/{progress.total_chunks}")
-
-        # Auto-advance processing
-        if st.session_state.processing_active and not st.session_state.processor.is_complete():
-            try:
-                # Process next chapter in background
-                def process_background():
-                    if st.session_state.processor:
-                        st.session_state.processor.process_next_chapter()
-
-                # Use a placeholder to trigger rerun after processing
-                placeholder = st.empty()
-                with placeholder.container():
-                    st.info("🔄 Processing next chapter...")
-
-                # Process in background thread
-                thread = threading.Thread(target=process_background)
-                thread.start()
-                thread.join(timeout=1)  # Wait up to 1 second
-
-                # Check if complete
-                if st.session_state.processor and st.session_state.processor.is_complete():
-                    st.session_state.processing_active = False
-                    st.success("✅ Processing complete!")
-                    st.balloons()
-
-                    # Offer to finalize
-                    if st.button("🎉 Finalize Book"):
-                        try:
-                            st.session_state.processor.finalize_book()
-                            st.success("📚 Book finalized! Switch to Review tab to listen.")
-                        except Exception as e:
-                            st.error(f"❌ Finalization failed: {e}")
-                else:
-                    # Continue processing - rerun to update UI
-                    time.sleep(0.5)  # Brief pause to prevent too frequent updates
-                    st.rerun()
-
-            except Exception as e:
-                st.error(f"❌ Processing error: {e}")
-                st.session_state.processing_active = False
-
-        # Completion message
-        if st.session_state.processor and st.session_state.processor.is_complete() and not st.session_state.processing_active:
-            st.success("🎉 All processing complete!")
-            st.info("Switch to the **Review Projects** tab to listen to your audiobook.")
-
-    # Instructions
-    with st.expander("ℹ️ How It Works"):
-        st.markdown("""
-        **Processing Stages:**
-        1. **Text Preparation** (fast): Load book, detect chapters, clean text
-        2. **Chapter Processing** (incremental): Convert each chapter to audio
-        3. **Finalization** (fast): Combine chapters into complete book
-
-        **Benefits:**
-        - See real-time progress
-        - Can stop/resume anytime
-        - Process large books without UI freezing
-        - Review chapters as they're completed
-        """)
-
-with main_tab_review:
-    st.header("🎧 Review Existing Projects")
-    st.write("Listen to and review your processed audiobooks.")
-
-    # 1. Project Selection
-    out_dir = Path("out")
-    if not out_dir.exists():
-        st.error("❌ No 'out/' directory found.")
-        st.info("Process a book first using the **Process New Book** tab.")
-        st.stop()
-
-    projects = [p.name for p in out_dir.iterdir() if p.is_dir()]
-    if not projects:
-        st.warning("No projects found in 'out/' directory.")
-        st.info("Create your first project using the **Process New Book** tab.")
-        st.stop()
-
-    selected_project_name = st.sidebar.selectbox("Select Project", projects, key="review_project")
-
-    if selected_project_name:
-        project_path = out_dir / selected_project_name
-        project = BookProject(project_path)
-
-        meta = project.load_meta()
-        index = project.load_index()
-
-        # 2. Metadata Display
-        st.sidebar.header("📋 Project Info")
-        if meta:
-            # Display key info in a compact format
-            with st.sidebar.expander("View full metadata"):
-                st.json(meta)
-            st.sidebar.metric("Total Chunks", len(index))
-            st.sidebar.metric("Backend", meta.get("backend", "unknown"))
-            st.sidebar.metric("Preset", meta.get("preset", "unknown"))
-        else:
-            st.sidebar.info("No project metadata found")
-
-        # 3. Main View - Tabs for Book vs Chunks
-        tab_book, tab_chapters, tab_chunks = st.tabs(["📚 Full Book", "📖 Chapters", "🎵 Chunks"])
-
-        with tab_book:
-            book_wav = project_path / "book.wav"
-            if book_wav.exists():
-                st.audio(str(book_wav), format='audio/wav')
-                file_size_mb = book_wav.stat().st_size / (1024 * 1024)
-                st.caption(f"📁 {book_wav.name} ({file_size_mb:.1f} MB)")
+            st.markdown(f"**Chunk {chunk_id:03d}**")
+            if wav_file.exists():
+                st.audio(str(wav_file), format="audio/wav")
             else:
-                st.info("Full book.wav not yet rendered. Check if synthesis completed.")
+                st.warning(f"Missing audio: {file_name}")
 
-        with tab_chapters:
-            chapter_files = sorted(list(project.chapters_dir.glob("*.wav")))
-            if not chapter_files:
-                st.info("No chapter files found yet.")
-            else:
-                st.write(f"Found {len(chapter_files)} chapter(s)")
-                for chap in chapter_files:
-                    with st.expander(f"▶️ {chap.name}"):
-                        st.audio(str(chap), format='audio/wav')
-                        file_size_mb = chap.stat().st_size / (1024 * 1024)
-                        st.caption(f"{file_size_mb:.1f} MB")
+        with col2:
+            st.text_area(
+                f"Chunk text {chunk_id}",
+                value=text_value[:1000],
+                height=140,
+                disabled=True,
+                key=f"chunk_text_{chunk_id}",
+            )
+        st.divider()
 
-        with tab_chunks:
-            st.header("🎵 Exploratory Chunk Review")
-            st.write("Evaluate pacing and prosody of synthesized speech.")
 
-            if not index:
-                st.warning("No chunks found in project index.")
-                st.stop()
+def main() -> None:
+    init_state()
+    render_header()
+    render_sidebar()
 
-            # Filtering
-            chapters = sorted(list(set(int(m["chapter_index"]) for m in index)))
-            if not chapters:
-                st.error("No chapters found in index.")
-                st.stop()
+    workflow_tab, setup_tab, library_tab, review_tab = st.tabs(
+        ["Workflow", "Setup", "Library", "Review"]
+    )
 
-            filter_chap = st.selectbox("Chapter", chapters, format_func=lambda x: f"Chapter {x+1}", key="review_chapter")
+    with workflow_tab:
+        render_workflow_tab()
 
-            chapter_chunks = [m for m in index if int(m["chapter_index"]) == filter_chap]
-            st.write(f"Found {len(chapter_chunks)} chunks in this chapter")
+    with setup_tab:
+        render_setup_tab()
 
-            if not chapter_chunks:
-                st.info("No chunks in this chapter.")
-                st.stop()
+    with library_tab:
+        render_library_tab()
 
-            for meta in chapter_chunks:
-                chunk_id = meta["id"]
-                wav_file = project.chunks_dir / meta["file"]
+    with review_tab:
+        render_review_tab()
 
-                col1, col2 = st.columns([1, 2])
 
-                with col1:
-                    st.markdown(f"**Chunk {chunk_id:03d}**")
-                    if wav_file.exists():
-                        st.audio(str(wav_file))
-                    else:
-                        st.error(f"⚠️ Missing: {meta['file']}")
-
-                with col2:
-                    text_preview = meta.get("text", "[No text]")[:500]
-                    st.text_area(
-                        label=f"Text (ID: {chunk_id})",
-                        value=text_preview,
-                        height=100,
-                        key=f"review_text_{chunk_id}",
-                        disabled=True
-                    )
-                st.divider()
-        st.header("🎵 Exploratory Chunk Review")
-        st.write("Evaluate pacing and prosody of synthesized speech.")
-        
-        if not index:
-            st.warning("No chunks found in project index.")
-            st.stop()
-        
-        # Filtering
-        chapters = sorted(list(set(int(m["chapter_index"]) for m in index)))
-        if not chapters:
-            st.error("No chapters found in index.")
-            st.stop()
-            
-        filter_chap = st.selectbox("Chapter", chapters, format_func=lambda x: f"Chapter {x+1}")
-        
-        chapter_chunks = [m for m in index if int(m["chapter_index"]) == filter_chap]
-        st.write(f"Found {len(chapter_chunks)} chunks in this chapter")
-        
-        if not chapter_chunks:
-            st.info("No chunks in this chapter.")
-            st.stop()
-        
-        for meta in chapter_chunks:
-            chunk_id = meta["id"]
-            wav_file = project.chunks_dir / meta["file"]
-            
-            col1, col2 = st.columns([1, 2])
-            
-            with col1:
-                st.markdown(f"**Chunk {chunk_id:03d}**")
-                if wav_file.exists():
-                    st.audio(str(wav_file))
-                else:
-                    st.error(f"⚠️ Missing: {meta['file']}")
-            
-            with col2:
-                text_preview = meta.get("text", "[No text]")[:500]
-                st.text_area(
-                    label=f"Text (ID: {chunk_id})",
-                    value=text_preview,
-                    height=100,
-                    key=f"text_{chunk_id}",
-                    disabled=True
-                )
-            st.divider()
+if __name__ == "__main__":
+    main()

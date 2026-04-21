@@ -197,9 +197,9 @@ def render_setup_tab() -> None:
                 uploaded_speaker_wav = None
             else:
                 uploaded_speaker_wav = st.file_uploader(
-                    "Reference voice WAV (optional)",
+                    "Reference voice WAV",
                     type=["wav"],
-                    help="Optional XTTS speaker reference.",
+                    help="Required for XTTS. Upload a clean speaker sample WAV.",
                 )
 
             preset = st.selectbox(
@@ -253,6 +253,8 @@ def render_setup_tab() -> None:
                     raise ValueError(f"Voice model not found: {voice_model}")
             else:
                 speaker_wav_path = get_selected_speaker_wav(uploaded_speaker_wav)
+                if speaker_wav_path is None:
+                    raise ValueError("XTTS requires a reference speaker WAV.")
 
             config = {
                 "input_file": input_file,

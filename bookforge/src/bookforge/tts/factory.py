@@ -26,4 +26,10 @@ def get_backend(
                 "XTTS dependencies are not installed. Please install torch and Coqui TTS."
             ) from e
 
+        return XTTSBackend(
+            speaker_wav=speaker_wav,
+            language="en",
+            gpu=True,
+        )
+
     raise ValueError(f"Unknown backend: {backend_type}")

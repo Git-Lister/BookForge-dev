@@ -27,7 +27,13 @@ RUN python3.11 -m venv $VENV_PATH
 RUN pip install --upgrade pip setuptools wheel
 
 RUN pip install \
-    torch torchaudio --index-url https://download.pytorch.org/whl/cu121
+    torch==2.2.0 torchaudio==2.2.0 --index-url https://download.pytorch.org/whl/cu121 && \
+    pip install "transformers==5.0.0" && \
+    pip install "coqui-tts==0.27.5"
+
+RUN python -c "import torch; print(torch.__version__)" && \
+    python -c "import transformers; print(transformers.__version__)" && \
+    python -c "from TTS.api import TTS; print('Coqui import OK')"
 
 COPY requirements.txt /app/requirements.txt
 RUN pip install -r /app/requirements.txt

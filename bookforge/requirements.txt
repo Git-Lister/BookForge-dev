@@ -3,7 +3,6 @@ pathvalidate>=3.2.0
 streamlit>=1.30.0
 ffmpeg-python>=0.2.0
 piper-tts>=1.4.0
-coqui-tts==0.27.5
 ebooklib>=0.20
 lxml>=5.0.0
 pydantic>=2.0.0

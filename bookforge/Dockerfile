@@ -26,6 +26,8 @@ RUN python3.11 -m venv $VENV_PATH
 
 RUN pip install --upgrade pip setuptools wheel
 
+RUN pip install "numpy==1.26.4"
+
 RUN pip install \
     torch==2.2.0 torchaudio==2.2.0 --index-url https://download.pytorch.org/whl/cu121 && \
     pip install "transformers==5.0.0" && \

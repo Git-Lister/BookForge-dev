@@ -1,0 +1,45 @@
+# Part I – Foundations
+
+## Chapter 1 – Why We Read Aloud
+
+Reading aloud is one of the oldest technologies we have for sharing thought.
+Before there were screens, or microphones, there was a voice and a listener.
+A good reading does more than deliver words in the right order.
+It carries rhythm, emphasis, and silence.
+
+When we listen to a voice, we are not only parsing sentences.
+We are also tracking breath, pacing, and tiny shifts in tone.
+Even a short pause can signal that something important has just been said.
+
+## Chapter 2 – What Makes Audio Work
+
+Long-form audio rewards clarity and consistency.
+The listener cannot skim backwards as easily as they can with a printed page.
+For that reason, a good narrator repeats key ideas without sounding repetitive.
+They also avoid long, tangled sentences that are hard to follow on first hearing.
+
+When we design an automated narrator, we have to care about these details.
+Prosody, phrasing, and timing all matter.
+A synthetic voice that stresses the wrong word can make a clear paragraph feel obscure.
+
+# Part II – Experiments
+
+## Chapter 3 – Small Scale Trials
+
+This is a short chapter meant for pipeline testing.
+It should not take long to render, even on modest hardware.
+If something goes wrong during synthesis, you will know quickly.
+
+Try changing the preset or backend, then re-run just this chapter.
+Listen for differences in pacing and emphasis.
+Ask whether the result feels conversational or mechanical.
+
+## Chapter 4 – Edge Cases and Pauses
+
+Numbers, abbreviations, and punctuation often behave differently in audio.
+For example, “Dr. Smith arrived at 3:15 p.m.” can be spoken in several ways.
+Some voices handle this smoothly; others sound hesitant or robotic.
+
+This final chapter includes a deliberate pause… right here.
+It also includes a short list: first, a simple sentence; second, a slightly longer one; third, a closing line.
+If your text-to-speech system can handle this passage gracefully, it is probably ready for longer work.

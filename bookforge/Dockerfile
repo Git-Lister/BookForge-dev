@@ -26,6 +26,7 @@ RUN python3.11 -m venv $VENV_PATH
 
 RUN pip install --upgrade pip setuptools wheel
 
+# Pin NumPy to 1.26.4 BEFORE installing PyTorch
 RUN pip install "numpy==1.26.4"
 
 RUN pip install \

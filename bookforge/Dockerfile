@@ -45,6 +45,13 @@ COPY . /app
 
 RUN pip install -e .
 
+# Accept Coqui license automatically
+ENV COQUI_TTS_AGREED=1
+
+# Persistent XTTS model cache (mount a volume here)
+ENV TTS_HOME=/models
+RUN mkdir -p /models
+
 EXPOSE 8501
 
-CMD ["streamlit", "run", "src/bookforge/ui.py", "--server.address=0.0.0.0", "--server.port=8501"]
+CMD ["python", "src/bookforge/ui_nicegui.py"]

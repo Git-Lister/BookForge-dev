@@ -26,6 +26,8 @@ def init_state() -> None:
         "uploaded_input_path": None,
         "uploaded_speaker_wav_path": None,
         "selected_project": None,
+        # Persist backend choice so it survives reruns
+        "backend": "piper",
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -90,6 +92,7 @@ def reset_workflow(keep_project_selection: bool = True) -> None:
     st.session_state.uploaded_input_path = None
     st.session_state.uploaded_speaker_wav_path = None
     st.session_state.selected_project = selected_project
+    # Do not reset backend choice so the UI doesn't flicker
 
 
 def stage_badge(stage: str) -> str:
@@ -157,6 +160,16 @@ def render_setup_tab() -> None:
     local_books = available_books()
     local_voices = available_voices()
 
+    # ---- Backend selection OUTSIDE the form (triggers instant rerun) ----
+    st.markdown("### Voice")
+    backend = st.radio(
+        "Backend",
+        options=["piper", "xtts"],
+        horizontal=True,
+        key="backend",
+    )
+
+    # ---- Form for the rest of the settings ----
     with st.form("setup_form", clear_on_submit=False):
         col1, col2 = st.columns(2)
 
@@ -180,19 +193,13 @@ def render_setup_tab() -> None:
             ).strip()
 
         with col2:
-            st.markdown("### Voice")
-            backend = st.radio(
-                "Backend",
-                options=["piper", "xtts"],
-                horizontal=True,
-            )
-
-            voice_model_name: Optional[str] = None
-            if backend == "piper":
+            # Render the correct voice widget based on current backend (from session_state)
+            if st.session_state.get("backend", "piper") == "piper":
                 voice_model_name = st.selectbox(
                     "Piper voice model",
                     options=[""] + [p.name for p in local_voices],
                     help="Select an ONNX model from voices/.",
+                    key="piper_voice_select",
                 )
                 uploaded_speaker_wav = None
             else:
@@ -200,7 +207,9 @@ def render_setup_tab() -> None:
                     "Reference voice WAV",
                     type=["wav"],
                     help="Required for XTTS. Upload a clean speaker sample WAV.",
+                    key="xtts_speaker_wav_uploader",
                 )
+                voice_model_name = None
 
             preset = st.selectbox(
                 "Preset",
@@ -233,7 +242,10 @@ def render_setup_tab() -> None:
 
         submitted = st.form_submit_button("Save configuration", use_container_width=True)
 
+    # ---- Validation after submission ----
     if submitted:
+        st.session_state.job_error = None
+
         try:
             input_file = get_selected_input_file(selected_book_name or None, uploaded_book)
             if input_file is None:
@@ -245,21 +257,25 @@ def render_setup_tab() -> None:
             voice_model = None
             speaker_wav_path = None
 
-            if backend == "piper":
-                if not voice_model_name:
+            current_backend = st.session_state.get("backend", "piper")
+
+            if current_backend == "piper":
+                voice_model_name_selected = st.session_state.get("piper_voice_select", voice_model_name)
+                if not voice_model_name_selected:
                     raise ValueError("Please select a Piper voice model.")
-                voice_model = voices_dir() / voice_model_name
+                voice_model = voices_dir() / voice_model_name_selected
                 if not voice_model.exists():
                     raise ValueError(f"Voice model not found: {voice_model}")
             else:
-                speaker_wav_path = get_selected_speaker_wav(uploaded_speaker_wav)
+                uploaded_wav = st.session_state.get("xtts_speaker_wav_uploader", None)
+                speaker_wav_path = get_selected_speaker_wav(uploaded_wav)
                 if speaker_wav_path is None:
                     raise ValueError("XTTS requires a reference speaker WAV.")
 
             config = {
                 "input_file": input_file,
                 "output_dir": out_dir() / output_name,
-                "backend": backend,
+                "backend": current_backend,
                 "voice_model": voice_model,
                 "speaker_wav": speaker_wav_path,
                 "preset": preset,
@@ -270,7 +286,7 @@ def render_setup_tab() -> None:
             }
 
             tts_backend = get_backend(
-                backend_type=backend,
+                backend_type=current_backend,
                 voice_model=voice_model,
                 speaker_wav=speaker_wav_path,
             )

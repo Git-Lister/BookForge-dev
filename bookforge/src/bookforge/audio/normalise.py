@@ -2,17 +2,13 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-import subprocess
 import json
 import os
+import subprocess
+from pathlib import Path
 
-
-# Set explicit path to ffmpeg if not on PATH
-FFMPEG_BIN = os.environ.get(
-    "BOOKFORGE_FFMPEG",
-    r"C:\Users\55124152\OneDrive - MMU\DLS\Tools\ffmpeg-8.0.1-essentials_build\ffmpeg-8.0.1-essentials_build\bin\ffmpeg.exe",
-)
+# Use BOOKFORGE_FFMPEG env var if set, otherwise just "ffmpeg" (works in Docker and on PATH)
+FFMPEG_BIN = os.environ.get("BOOKFORGE_FFMPEG", "ffmpeg")
 
 
 def normalize_audio(
@@ -83,7 +79,6 @@ def normalize_audio(
             f"offset={measured['target_offset']}:"
             "print_format=summary"
         ),
-        "-ar", "22050",  # Match Piper's default sample rate
         "-y",
         str(output_path)
     ]

@@ -2,18 +2,14 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Iterable, List
-import os
 
 import ffmpeg  # type: ignore[import]
 
-
-# Set explicit path to ffmpeg if not on PATH
-FFMPEG_BIN = os.environ.get(
-    "BOOKFORGE_FFMPEG",
-    r"C:\Users\55124152\OneDrive - MMU\DLS\Tools\ffmpeg-8.0.1-essentials_build\ffmpeg-8.0.1-essentials_build\bin\ffmpeg.exe",
-)
+# Use BOOKFORGE_FFMPEG env var if set, otherwise just "ffmpeg" (works in Docker and on PATH)
+FFMPEG_BIN = os.environ.get("BOOKFORGE_FFMPEG", "ffmpeg")
 
 
 def concat_wavs(wav_paths: Iterable[Path], output_path: Path) -> None:

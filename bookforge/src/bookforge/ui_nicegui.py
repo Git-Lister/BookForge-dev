@@ -1,5 +1,5 @@
 """
-BookForge Studio – NiceGUI UI (async upload callbacks)
+BookForge Studio – NiceGUI UI (stable uploads + non‑blocking model load)
 """
 
 from __future__ import annotations
@@ -48,60 +48,6 @@ def list_projects() -> list[str]:
 
 async def run_in_thread(func, *args, **kwargs):
     return await asyncio.to_thread(func, *args, **kwargs)
-
-async def get_upload_bytes(e) -> bytes:
-    """
-    Extract file bytes from a NiceGUI upload event.
-    Works with e.file (async read), e.content, e.data, etc.
-    """
-    # Primary path: e.file (starlette UploadFile) – requires async read
-    if hasattr(e, "file") and e.file is not None:
-        file_obj = e.file
-        # Single file object with .read() (async)
-        if hasattr(file_obj, "read"):
-            return await file_obj.read()
-        # Fallback if file_obj is a list (multiple files)
-        if isinstance(file_obj, list) and file_obj:
-            first = file_obj[0]
-            if hasattr(first, "read"):
-                return await first.read()
-            if hasattr(first, "content"):
-                return first.content.read()
-            if hasattr(first, "data"):
-                return first.data
-    # Fallback: modern single-file with e.content (BytesIO, sync)
-    if hasattr(e, "content") and e.content is not None:
-        return e.content.read()
-    # Fallback: older single-file with e.data (bytes)
-    if hasattr(e, "data") and e.data is not None:
-        return e.data
-    # Fallback: multi-upload list
-    if hasattr(e, "files") and e.files:
-        first = e.files[0]
-        if hasattr(first, "content"):
-            return first.content.read()
-        if hasattr(first, "data"):
-            return first.data
-        if hasattr(first, "read"):
-            return await first.read()
-    raise AttributeError(
-        f"Cannot extract bytes from upload event. "
-        f"Event type: {type(e).__name__}, attributes: {dir(e)}"
-    )
-
-def get_upload_filename(e) -> str:
-    """Extract original filename from upload event."""
-    if hasattr(e, "file") and e.file is not None:
-        file_obj = e.file
-        if hasattr(file_obj, "filename"):
-            return file_obj.filename
-        if isinstance(file_obj, list) and file_obj:
-            first = file_obj[0]
-            if hasattr(first, "filename"):
-                return first.filename
-    if hasattr(e, "name"):
-        return e.name
-    return "uploaded_file"
 
 # ---------------------------------------------------------------------------
 # Main page
@@ -182,21 +128,22 @@ async def main_page():
                         label="Target LUFS", value=-16.0, step=0.5, format="%.1f",
                     ).bind_visibility_from(normalize_check, "value")
 
-            # ---- Upload callbacks (now async) ----
-            async def on_book_upload(e):
+            # ---- Upload callbacks (sync, using NiceGUI's real API) ----
+            def on_book_upload(e):
                 global _book_bytes, _book_filename
                 try:
-                    _book_bytes = await get_upload_bytes(e)
-                    _book_filename = get_upload_filename(e)
+                    # e.file is an UploadedFile with .name and .content (BytesIO)
+                    _book_bytes = e.file.content.read()
+                    _book_filename = e.file.name or "uploaded_book.txt"
                     ui.notify(f"Book '{_book_filename}' uploaded", type="positive")
                 except Exception as exc:
                     ui.notify(f"Failed to read book file: {exc}", type="negative")
 
-            async def on_speaker_upload(e):
+            def on_speaker_upload(e):
                 global _speaker_bytes, _speaker_filename
                 try:
-                    _speaker_bytes = await get_upload_bytes(e)
-                    _speaker_filename = get_upload_filename(e)
+                    _speaker_bytes = e.file.content.read()
+                    _speaker_filename = e.file.name or "speaker.wav"
                     ui.notify(f"Speaker WAV '{_speaker_filename}' uploaded", type="positive")
                 except Exception as exc:
                     ui.notify(f"Failed to read speaker file: {exc}", type="negative")
@@ -255,8 +202,10 @@ async def main_page():
                     "target_lufs": target_lufs.value,
                 }
 
+                # Run the heavy model loading in a thread to keep the UI alive
                 try:
-                    tts_backend = get_backend(
+                    tts_backend = await run_in_thread(
+                        get_backend,
                         backend_type=backend,
                         voice_model=voice_model,
                         speaker_wav=speaker_wav,
@@ -310,7 +259,7 @@ async def main_page():
             async def _process_chapter():
                 global _processor
                 if _processor is None:
-                    return
+                    return False  # False means no more work
                 try:
                     await run_in_thread(_processor.process_next_chapter)
                     progress = _processor.get_progress()
@@ -320,6 +269,7 @@ async def main_page():
                     status_label.set_text(
                         f"{progress.status_message} (ETA: {eta})" if eta else progress.status_message
                     )
+                    return True
                 except Exception as e:
                     ui.notify(f"Chapter error: {e}", type="negative")
                     raise
@@ -336,18 +286,28 @@ async def main_page():
                 all_btn.disable()
                 try:
                     while _processor and not _processor.is_complete() and not stop_flag:
-                        await _process_chapter()
+                        success = await _process_chapter()
+                        if not success:
+                            break
                         await asyncio.sleep(0.1)
+                except Exception:
+                    # If a chapter failed, the processor may not be complete; stay on this step
+                    ui.notify("Processing stopped due to an error. Check the logs and try again.", type="negative")
                 finally:
                     next_btn.enable()
                     all_btn.enable()
                     if _processor and _processor.is_complete():
                         ui.notify("All chapters synthesised!", type="positive")
                         stepper.next()
+                    elif not stop_flag:
+                        ui.notify("Processing was interrupted or not all chapters completed.", type="warning")
 
             next_btn = ui.button("Process Next Chapter", icon="skip_next", on_click=lambda: process_one())
             all_btn = ui.button("Process All Remaining", icon="fast_forward", on_click=lambda: process_all())
             all_btn.props("color=secondary")
+            # Disable the "All" button if processing is already complete at step entry
+            if _processor and _processor.is_complete():
+                all_btn.disable()
 
         # ██████ Step 4 – Finalize ██████
         with ui.step("Finalize"):

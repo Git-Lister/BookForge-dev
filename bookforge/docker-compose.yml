@@ -1,0 +1,19 @@
+services:
+  studio:
+    image: bookforge-xtts
+    build: .
+    ports:
+      - "8501:8501"
+    volumes:
+      - .:/app
+      - C:\bookforge\models:/models
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    stdin_open: true
+    tty: true
+    command: python src/bookforge/ui_nicegui.py

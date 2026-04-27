@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import json
-import time
-from dataclasses import dataclass
+import logging
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -18,16 +18,20 @@ from .project import BookProject
 from .tts.backend import TTSBackend
 
 
+class AbortException(Exception):
+    """Raised when processing is aborted by the user."""
+    pass
+
+
 @dataclass
 class ProcessingProgress:
-    """Detailed progress information for UI display."""
-    stage: str  # 'preparing_text', 'processing_chapters', 'finalizing'
+    stage: str
     current_chapter: int
     total_chapters: int
     current_chunk: int
     total_chunks: int
-    chapter_progress: float  # 0.0 to 1.0
-    overall_progress: float  # 0.0 to 1.0
+    chapter_progress: float
+    overall_progress: float
     estimated_time_remaining: str
     status_message: str
     start_time: datetime
@@ -51,24 +55,15 @@ class ProcessingProgress:
 
 @dataclass
 class ChapterProgress:
-    """Progress state for a single chapter."""
     chapter_index: int
     cleaned_text: str
-    chunks: List[Chunk]
+    chunks: List[Chunk] = field(default_factory=list)
     processed_chunks: int = 0
     chapter_audio_created: bool = False
+    error_message: Optional[str] = None
 
 
 class IncrementalProcessor:
-    """
-    Incremental book processor designed for UI-based workflows.
-
-    Stages:
-    1. Prepare text (fast): Load, detect chapters, clean text
-    2. Process chapters (incremental): Chunk and synthesize each chapter
-    3. Finalize (fast): Concatenate chapters into full book
-    """
-
     def __init__(
         self,
         input_file: Path,
@@ -83,6 +78,7 @@ class IncrementalProcessor:
         self.input_file = input_file
         self.output_dir = output_dir
         self.backend = backend
+        self.backend_name = "unknown"          # will be set by UI/CLI
         self.preset = preset
         self.chapter_strategy = chapter_strategy
         self.chapter_min_confidence = chapter_min_confidence
@@ -92,155 +88,74 @@ class IncrementalProcessor:
         self.project = BookProject(output_dir)
         self.config = PresetConfig.load(preset)
 
-        # State
         self.book_text: Optional[BookText] = None
         self.chapter_progress: List[ChapterProgress] = []
         self.all_chunks: List[Chunk] = []
         self.start_time = datetime.now()
-        self.last_update_time = self.start_time
+        self.stop_requested = False
 
-        # Progress file for persistence
-        self.progress_file = self.output_dir / "processing_progress.json"
+        # Logging
+        self.logger = logging.getLogger('bookforge.processor')
+        self.logger.setLevel(logging.DEBUG)
+        log_file = output_dir / "processing.log"
+        log_file.unlink(missing_ok=True)
+        fh = logging.FileHandler(log_file, encoding='utf-8')
+        fh.setLevel(logging.DEBUG)
+        formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+        fh.setFormatter(formatter)
+        self.logger.addHandler(fh)
+        self.logger.info(f"Processor initialised for {input_file}")
 
-        # Load existing progress if available
-        self._load_progress()
+        self.progress_file = output_dir / "processing_progress.json"
 
-    def _load_progress(self) -> None:
-        """Load existing progress from file."""
-        if self.progress_file.exists():
-            try:
-                with self.progress_file.open('r') as f:
-                    data = json.load(f)
-                    # Restore state from saved progress
-                    # (Implementation would restore chapter_progress, etc.)
-                    pass
-            except Exception:
-                # If progress file is corrupted, start fresh
-                pass
-
-    def _save_progress(self) -> None:
-        """Save current progress to file."""
-        progress_data = {
-            'input_file': str(self.input_file),
-            'output_dir': str(self.output_dir),
-            'preset': self.preset,
-            'chapter_strategy': self.chapter_strategy,
-            'chapter_min_confidence': self.chapter_min_confidence,
-            'normalize': self.normalize,
-            'target_lufs': self.target_lufs,
-            'book_text': self.book_text.__dict__ if self.book_text else None,
-            'chapter_progress': [
-                {
-                    'chapter_index': cp.chapter_index,
-                    'processed_chunks': cp.processed_chunks,
-                    'chapter_audio_created': cp.chapter_audio_created,
-                    'chunks_count': len(cp.chunks),
-                }
-                for cp in self.chapter_progress
-            ],
-            'all_chunks_count': len(self.all_chunks),
-            'start_time': self.start_time.isoformat(),
-        }
-
-        with self.progress_file.open('w') as f:
-            json.dump(progress_data, f, indent=2)
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+    def abort(self):
+        self.stop_requested = True
+        self.logger.warning("Abort requested by user")
 
     def prepare_text(self) -> None:
-        """Stage 1: Load and prepare text (fast operation)."""
         if self.book_text is not None:
-            return  # Already prepared
-
-        # Load and detect chapters
+            return
+        self.logger.info("Preparing text...")
         self.book_text = load_txt(
             self.input_file,
             chapter_strategy=self.chapter_strategy,
-            min_confidence=self.chapter_min_confidence
+            min_confidence=self.chapter_min_confidence,
         )
-
-        # Initialize chapter progress
-        self.chapter_progress = []
-        for i, chapter_text in enumerate(self.book_text.chapters):
-            cleaned = clean_text(chapter_text)
-            self.chapter_progress.append(ChapterProgress(
-                chapter_index=i,
-                cleaned_text=cleaned,
-                chunks=[]
-            ))
-
+        self.chapter_progress = [
+            ChapterProgress(chapter_index=i, cleaned_text=clean_text(ch))
+            for i, ch in enumerate(self.book_text.chapters)
+        ]
+        self.logger.info(f"Found {len(self.chapter_progress)} chapters")
         self._save_progress()
 
     def process_next_chapter(self) -> bool:
-        """
-        Stage 2: Process the next unprocessed chapter.
-
-        Returns True if a chapter was processed, False if all done.
-        """
-        if not self.book_text:
+        if self.stop_requested:
+            self.logger.info("Stop requested, skipping")
+            raise AbortException("Processing aborted")
+        if self.book_text is None:
             raise ValueError("Must call prepare_text() first")
 
-        # Find next unprocessed chapter
-        for chapter_prog in self.chapter_progress:
-            if not chapter_prog.chapter_audio_created:
-                self._process_chapter(chapter_prog)
+        for cp in self.chapter_progress:
+            if not cp.chapter_audio_created and cp.error_message is None:
+                self._process_chapter(cp)
                 self._save_progress()
                 return True
-
-        return False  # All chapters processed
-
-    def _process_chapter(self, chapter_prog: ChapterProgress) -> None:
-        """Process a single chapter: chunk and synthesize."""
-        chapter_idx = chapter_prog.chapter_index
-
-        # Chunk the chapter if not already done
-        if not chapter_prog.chunks:
-            starting_chunk_id = len(self.all_chunks)
-            chapter_prog.chunks = chunk_chapter(
-                chapter_prog.cleaned_text,
-                self.config,
-                chapter_idx,
-                starting_chunk_id=starting_chunk_id
-            )
-
-        # Synthesize chunks
-        chunk_wav_files = []
-        for chunk in chapter_prog.chunks:
-            if chapter_prog.processed_chunks >= len(chapter_prog.chunks):
-                continue  # Already processed
-
-            # Synthesize this chunk
-            out_wav = self.project.chunks_dir / f"chunk_{chunk.id:05d}.wav"
-            self.backend.synthesize_chunk(chunk, self.config, out_wav)
-
-            chunk_wav_files.append(out_wav)
-            chapter_prog.processed_chunks += 1
-            self.all_chunks.append(chunk)
-
-            # Save progress after each chunk for resumability
-            self._save_progress()
-
-        # Concatenate chapter chunks into chapter audio
-        if chunk_wav_files and not chapter_prog.chapter_audio_created:
-            chapter_wav = self.project.chapters_dir / f"chapter_{chapter_idx + 1:02d}.wav"
-            concat_wavs(chunk_wav_files, chapter_wav)
-            chapter_prog.chapter_audio_created = True
+        return False
 
     def finalize_book(self) -> None:
-        """Stage 3: Finalize the complete book (fast operation)."""
         if not self.is_complete():
             raise ValueError("Cannot finalize: processing not complete")
-
-        # Concatenate all chapter WAVs into final book
-        chapter_wavs = []
-        for i in range(len(self.chapter_progress)):
-            chapter_wav = self.project.chapters_dir / f"chapter_{i + 1:02d}.wav"
-            if chapter_wav.exists():
-                chapter_wavs.append(chapter_wav)
-
+        self.logger.info("Finalizing book...")
+        chapter_wavs = [
+            self.project.chapters_dir / f"chapter_{i+1:02d}.wav"
+            for i in range(len(self.chapter_progress))
+        ]
         if chapter_wavs:
             book_wav = self.output_dir / "book.wav"
             concat_wavs(chapter_wavs, book_wav)
-
-            # Apply normalization if requested
             if self.normalize:
                 from .audio.normalise import normalize_audio
                 normalized_wav = self.output_dir / "book_normalized.wav"
@@ -248,95 +163,78 @@ class IncrementalProcessor:
                 book_wav.unlink()
                 normalized_wav.rename(book_wav)
 
-        # Save final project metadata
         chunk_dicts = [chunk.to_dict() for chunk in self.all_chunks]
         self.project.save_index(chunk_dicts)
-
         self.project.save_meta({
-            "backend": getattr(self.backend, '__class__', {}).get('__name__', 'unknown'),
+            "backend": self.backend_name,
             "source_file": str(self.input_file.resolve()),
             "preset": self.preset,
             "chapter_strategy": self.chapter_strategy,
             "chapter_min_confidence": self.chapter_min_confidence,
             "normalize": self.normalize,
             "target_lufs": self.target_lufs,
-            "version": "1.1.0",
+            "version": "1.2.0",
             "processing_completed": datetime.now().isoformat(),
         })
-
-        # Clean up progress file
         if self.progress_file.exists():
             self.progress_file.unlink()
+        self.logger.info("Finalization complete")
 
     def is_complete(self) -> bool:
-        """Check if all processing is complete."""
         return (
             self.book_text is not None and
             all(cp.chapter_audio_created for cp in self.chapter_progress)
         )
 
+    # ------------------------------------------------------------------
+    # Progress helpers
+    # ------------------------------------------------------------------
     def get_progress(self) -> ProcessingProgress:
-        """Get detailed progress information for UI display."""
-        if not self.book_text:
+        if not self.book_text or not self.chapter_progress:
             return ProcessingProgress(
-                stage='preparing_text',
-                current_chapter=0,
-                total_chapters=0,
-                current_chunk=0,
-                total_chunks=0,
-                chapter_progress=0.0,
-                overall_progress=0.0,
-                estimated_time_remaining='Unknown',
-                status_message='Preparing text...',
-                start_time=self.start_time,
-                elapsed_time=self._format_elapsed_time(),
+                stage='preparing_text', current_chapter=0, total_chapters=0,
+                current_chunk=0, total_chunks=0, chapter_progress=0.0, overall_progress=0.0,
+                estimated_time_remaining='Unknown', status_message='Preparing text...',
+                start_time=self.start_time, elapsed_time=self._format_elapsed_time(),
             )
 
         total_chapters = len(self.chapter_progress)
         completed_chapters = sum(1 for cp in self.chapter_progress if cp.chapter_audio_created)
-
-        # Find current chapter being processed
         current_chapter_idx = 0
         current_chunk_total = 0
+        current_chunk_done = 0
         for i, cp in enumerate(self.chapter_progress):
-            if not cp.chapter_audio_created:
+            if not cp.chapter_audio_created and cp.error_message is None:
                 current_chapter_idx = i
                 current_chunk_total = len(cp.chunks)
+                current_chunk_done = cp.processed_chunks
                 break
-            current_chapter_idx = total_chapters  # All done
+        else:
+            current_chapter_idx = total_chapters
 
-        # Calculate current chunk progress
-        current_chunk = 0
-        if current_chapter_idx < total_chapters:
-            cp = self.chapter_progress[current_chapter_idx]
-            current_chunk = cp.processed_chunks
-
-        # Calculate progress percentages
-        chapter_progress = current_chunk / max(current_chunk_total, 1)
+        chapter_progress = current_chunk_done / max(current_chunk_total, 1) if current_chunk_total else 1.0
         overall_progress = (completed_chapters + chapter_progress) / max(total_chapters, 1)
 
-        # Estimate time remaining
         elapsed = (datetime.now() - self.start_time).total_seconds()
         if overall_progress > 0:
-            total_estimated = elapsed / overall_progress
-            remaining = total_estimated - elapsed
+            total_est = elapsed / overall_progress
+            remaining = total_est - elapsed
             eta = self._format_time_remaining(remaining)
         else:
             eta = 'Calculating...'
 
-        # Status message
         if current_chapter_idx >= total_chapters:
-            status = 'Processing complete!'
+            status = 'All chapters processed'
         elif current_chunk_total == 0:
-            status = f'Preparing chapter {current_chapter_idx + 1}/{total_chapters}'
+            status = f'Preparing chapter {current_chapter_idx+1}/{total_chapters}'
         else:
-            status = f'Synthesizing chunk {current_chunk}/{current_chunk_total} in Chapter {current_chapter_idx + 1}'
+            status = f'Synthesizing chunk {current_chunk_done+1}/{current_chunk_total} in Chapter {current_chapter_idx+1}'
 
         return ProcessingProgress(
-            stage='processing_chapters' if self.book_text else 'preparing_text',
+            stage='processing_chapters',
             current_chapter=current_chapter_idx + 1,
             total_chapters=total_chapters,
-            current_chunk=current_chunk,
+            current_chunk=current_chunk_done + 1,
             total_chunks=current_chunk_total,
             chapter_progress=chapter_progress,
             overall_progress=overall_progress,
@@ -346,20 +244,100 @@ class IncrementalProcessor:
             elapsed_time=self._format_elapsed_time(),
         )
 
+    @property
+    def chapter_statuses(self) -> List[Dict[str, Any]]:
+        if not self.chapter_progress:
+            return []
+        return [
+            {
+                "index": cp.chapter_index + 1,
+                "processed": cp.chapter_audio_created,
+                "error": cp.error_message or "",
+                "chunks_done": cp.processed_chunks,
+                "chunks_total": len(cp.chunks),
+            }
+            for cp in self.chapter_progress
+        ]
+
+    # ------------------------------------------------------------------
+    # Internals
+    # ------------------------------------------------------------------
+    def _process_chapter(self, cp: ChapterProgress) -> None:
+        chapter_idx = cp.chapter_index
+        self.logger.info(f"Starting chapter {chapter_idx+1}/{len(self.chapter_progress)}")
+
+        if not cp.chunks:
+            starting_chunk_id = len(self.all_chunks)
+            cp.chunks = chunk_chapter(
+                cp.cleaned_text,
+                self.config,
+                chapter_idx,
+                starting_chunk_id=starting_chunk_id,
+            )
+
+        chunk_wav_files = []
+        for chunk in cp.chunks:
+            if cp.processed_chunks >= len(cp.chunks):
+                continue
+            if self.stop_requested:
+                self.logger.warning(f"Aborting during chapter {chapter_idx+1} chunk {chunk.id}")
+                raise AbortException("Processing aborted")
+
+            out_wav = self.project.chunks_dir / f"chunk_{chunk.id:05d}.wav"
+            try:
+                self.backend.synthesize_chunk(chunk, self.config, out_wav)
+                chunk_wav_files.append(out_wav)
+                cp.processed_chunks += 1
+                self.all_chunks.append(chunk)
+                self.logger.debug(f"Chunk {chunk.id} done")
+            except Exception as e:
+                cp.error_message = f"Chunk {chunk.id}: {e}"
+                self.logger.error(f"Error in chapter {chapter_idx+1} chunk {chunk.id}: {e}")
+                raise
+
+        if chunk_wav_files and not cp.chapter_audio_created:
+            chapter_wav = self.project.chapters_dir / f"chapter_{chapter_idx + 1:02d}.wav"
+            concat_wavs(chunk_wav_files, chapter_wav)
+            cp.chapter_audio_created = True
+            self.logger.info(f"Chapter {chapter_idx+1} complete")
+
+    def _save_progress(self) -> None:
+        progress_data = {
+            'input_file': str(self.input_file),
+            'output_dir': str(self.output_dir),
+            'preset': self.preset,
+            'chapter_strategy': self.chapter_strategy,
+            'chapter_min_confidence': self.chapter_min_confidence,
+            'normalize': self.normalize,
+            'target_lufs': self.target_lufs,
+            'chapter_progress': [
+                {
+                    'chapter_index': cp.chapter_index,
+                    'processed_chunks': cp.processed_chunks,
+                    'chapter_audio_created': cp.chapter_audio_created,
+                    'error_message': cp.error_message,
+                    'chunks_count': len(cp.chunks),
+                }
+                for cp in self.chapter_progress
+            ],
+            'all_chunks_count': len(self.all_chunks),
+            'start_time': self.start_time.isoformat(),
+        }
+        with self.progress_file.open('w') as f:
+            json.dump(progress_data, f, indent=2)
+
     def _format_time_remaining(self, seconds: float) -> str:
-        """Format seconds into human-readable time."""
         if seconds < 60:
             return f"{int(seconds)}s"
         elif seconds < 3600:
-            minutes = int(seconds // 60)
+            mins = int(seconds // 60)
             secs = int(seconds % 60)
-            return f"{minutes}m {secs}s"
+            return f"{mins}m {secs}s"
         else:
             hours = int(seconds // 3600)
-            minutes = int((seconds % 3600) // 60)
-            return f"{hours}h {minutes}m"
+            mins = int((seconds % 3600) // 60)
+            return f"{hours}h {mins}m"
 
     def _format_elapsed_time(self) -> str:
-        """Format elapsed time."""
         elapsed = (datetime.now() - self.start_time).total_seconds()
         return self._format_time_remaining(elapsed)

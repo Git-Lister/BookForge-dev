@@ -21,3 +21,9 @@ out/
 
 # Allow keeping example/test input files
 !books/
+
+
+# Keep the out/ directory tracked, but ignore all its contents
+touch out/.gitkeep
+git add -f out/.gitkeep
+git commit -m "Keep out/ directory tracked"

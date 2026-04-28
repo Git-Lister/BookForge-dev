@@ -27,4 +27,7 @@ out/
 touch out/.gitkeep
 git add -f out/.gitkeep
 git commit -m "Keep out/ directory tracked"
+
+touch books/.gitkeep
+git add -f books/.gitkeep
 git commit -m "Keep books/ directory tracked"

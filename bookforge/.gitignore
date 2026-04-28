@@ -1,3 +1,4 @@
+# Python
 __pycache__/
 *.py[cod]
 .venv/
@@ -9,25 +10,26 @@ venv/
 .coverage
 htmlcov/
 *.log
+
+# Audio outputs
 chunks/
-voices/
 *.wav
 *.m4b
 *.m4a
-debug/
+
+# Voice models (large binary files)
+voices/
 
 # Generated audiobooks and project outputs
-out/
+out/*
+!out/.gitkeep
 
-# Allow keeping example/test input files
-!books/
+# Test data & book source files
+books/*
+!books/.gitkeep
 
+# Temporary uploads
+temp/
 
-# Keep the out/ directory tracked, but ignore all its contents
-touch out/.gitkeep
-git add -f out/.gitkeep
-git commit -m "Keep out/ directory tracked"
-
-touch books/.gitkeep
-git add -f books/.gitkeep
-git commit -m "Keep books/ directory tracked"
+# Debug / logs
+debug/

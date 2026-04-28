@@ -1,14 +1,15 @@
 """
-BookForge Studio – NiceGUI UI (live progress, stop button, chapter status cards, load existing configs)
+Audio‑Files Studio – server‑side processing, reconnectable UI
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
 from pathlib import Path
 from typing import Any, Optional
 
-from nicegui import ui
+from nicegui import app, ui
 
 from bookforge.incremental_processor import AbortException, IncrementalProcessor
 from bookforge.project import BookProject
@@ -22,7 +23,58 @@ VOICES_DIR = Path("voices")
 OUT_DIR = Path("out")
 TMP_DIR = Path("temp")
 TMP_DIR.mkdir(exist_ok=True)
-APP_TITLE = "🔨 BookForge Studio"
+APP_TITLE = "🎙️ Audio‑Files Studio"
+
+# ---------------------------------------------------------------------------
+# Shared state (survives page reloads)
+# ---------------------------------------------------------------------------
+def get_processor() -> Optional[IncrementalProcessor]:
+    return app.storage.general.get("processor")
+
+def set_processor(p: Optional[IncrementalProcessor]):
+    app.storage.general["processor"] = p
+
+def get_progress_dict() -> dict:
+    return app.storage.general.get("progress", {
+        "overall_progress": 0.0,
+        "chapter_progress": 0.0,
+        "status_message": "Idle",
+        "estimated_time_remaining": "",
+        "chapter_statuses_html": "",
+        "active": False,
+    })
+
+def set_progress_dict(d: dict):
+    app.storage.general["progress"] = d
+
+async def run_in_thread(func, *args, **kwargs):
+    return await asyncio.to_thread(func, *args, **kwargs)
+
+def update_progress_from_processor(proc: IncrementalProcessor):
+    progress = proc.get_progress()
+    html_parts = ['<div style="display:flex; flex-wrap:wrap; gap:8px;">']
+    for ch in proc.chapter_statuses:
+        badge = "⚪"
+        if ch["error"]:
+            badge = "🔴"
+        elif ch["processed"]:
+            badge = "🟢"
+        else:
+            badge = "🔵" if ch["chunks_done"] > 0 else "⚪"
+        status_text = f"{badge} Ch{ch['index']}"
+        if ch["error"]:
+            status_text += " ❌"
+        html_parts.append(
+            f'<span style="padding:4px 8px; border:1px solid #ccc; border-radius:4px; font-size:0.85rem;">{status_text}</span>'
+        )
+    html_parts.append('</div>')
+    set_progress_dict({
+        "overall_progress": progress.overall_progress,
+        "chapter_progress": progress.chapter_progress,
+        "status_message": f"{progress.status_message} (ETA: {progress.estimated_time_remaining})",
+        "estimated_time_remaining": progress.estimated_time_remaining,
+        "chapter_statuses_html": ''.join(html_parts),
+    })
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -34,20 +86,9 @@ def list_voices() -> list[str]:
     return sorted([p.name for p in VOICES_DIR.glob("*.onnx") if p.is_file()])
 
 def list_projects() -> list[str]:
-    # Projects with meta.json (completed/finalized)
-    completed = sorted([
-        p.name for p in OUT_DIR.iterdir()
-        if p.is_dir() and (p / "meta.json").exists()
-    ])
-    # Projects with processing_progress.json but not yet finalized
-    incomplete = sorted([
-        p.name for p in OUT_DIR.iterdir()
-        if p.is_dir() and (p / "processing_progress.json").exists() and not (p / "meta.json").exists()
-    ])
+    completed = sorted([p.name for p in OUT_DIR.iterdir() if p.is_dir() and (p / "meta.json").exists()])
+    incomplete = sorted([p.name for p in OUT_DIR.iterdir() if p.is_dir() and (p / "processing_progress.json").exists() and not (p / "meta.json").exists()])
     return completed + incomplete
-
-async def run_in_thread(func, *args, **kwargs):
-    return await asyncio.to_thread(func, *args, **kwargs)
 
 async def extract_upload_bytes(e) -> tuple[bytes, str]:
     source = None
@@ -82,13 +123,24 @@ async def extract_upload_bytes(e) -> tuple[bytes, str]:
 # ---------------------------------------------------------------------------
 @ui.page("/")
 async def main_page():
-    processor: Optional[IncrementalProcessor] = None
-    book_event: Optional[Any] = None
-    speaker_event: Optional[Any] = None
-    step_state = ["Setup"]
-    step_cards: dict[str, ui.element] = {}
+    # ── Initialise local state ──
+    processor = None
+    book_event = None
+    speaker_event = None
 
-    # Notification area
+    # ── Before‑unload warning (inside page so scope is correct) ──
+    ui.add_head_html('''
+    <script>
+    window.onbeforeunload = function(e) {
+        if (document.getElementById("processing-indicator") !== null) {
+            e.returnValue = "Processing is still running in the background. You can close the tab safely.";
+            return e.returnValue;
+        }
+    };
+    </script>
+    ''')
+
+    # ── Notification area ──
     with ui.column().classes("w-full") as notif_area:
         pass
 
@@ -96,148 +148,376 @@ async def main_page():
         with notif_area:
             ui.notify(msg, type=type, timeout=5)
 
-    # Stepper header
-    with ui.row().classes("gap-4 q-mb-md justify-center"):
-        for step_name in ["Setup", "Prepare", "Synthesize", "Finalize", "Review"]:
-            ui.button(step_name).props("flat").on_click(lambda s=step_name: set_step(s))
+    # ── Views ──
+    with ui.column().classes("w-full") as main_container:
+        # HOME
+        with ui.column().classes("w-full") as home_card:
+            with ui.card().classes("w-full q-pa-xl text-center"):
+                ui.label(APP_TITLE).classes("text-h3 text-primary")
+                ui.markdown("Create audiobooks from text files using local TTS engines.").classes("q-mb-xl")
+                with ui.row().classes("justify-center gap-8"):
+                    with ui.card().classes("cursor-pointer col-5") as new_card:
+                        ui.label("📖 New Project").classes("text-h5")
+                        ui.markdown("Start a fresh audiobook.")
+                        ui.tooltip("Begin creating a completely new audiobook")
+                        new_card.on("click", lambda: start_new_project())
+                    with ui.card().classes("cursor-pointer col-5") as projects_card:
+                        ui.label("📚 My Projects").classes("text-h5")
+                        ui.markdown("Resume, review, or listen.")
+                        ui.tooltip("Manage your existing projects")
+                        projects_card.on("click", lambda: show_view("projects"))
 
-    step_change_callbacks = []
+        # PIPELINE
+        with ui.column().classes("w-full") as pipeline_card:
+            pipeline_card.visible = False
+            with ui.row().classes("w-full justify-end"):
+                ui.button("← Back to Home", on_click=lambda: show_view("home")).props("flat")
+            pipeline_step_label = ui.label("").classes("text-subtitle1 q-mb-md")
 
-    def set_step(step: str):
-        step_state[0] = step
-        for name, card in step_cards.items():
-            card.visible = (name == step)
-        for cb in step_change_callbacks:
-            cb()
+            # Setup
+            with ui.column().classes("w-full") as setup_card:
+                ui.label("1. Setup").classes("text-h5 q-mb-md")
 
-    # ████████████████████████ Setup Card ████████████████████████
-    with ui.column().classes("w-full") as setup_card:
-        step_cards["Setup"] = setup_card
-        ui.label("1. Setup").classes("text-h6 q-mb-md")
-        ui.markdown("Select your book, TTS backend, and voice settings. Or load a previous project.")
+                existing_projects = list_projects()
+                clone_select = None
+                if existing_projects:
+                    with ui.row().classes("items-center gap-2 q-mb-md"):
+                        ui.label("Clone settings from").classes("text-caption")
+                        clone_select = ui.select(
+                            options=[""] + existing_projects,
+                            value="",
+                            on_change=lambda e: clone_settings(e.value),
+                        ).classes("w-64")
+                        ui.tooltip("Copy configuration from a previous project")
 
-        # ---- Load existing project ----
-        existing_projects = list_projects()
-        if existing_projects:
-            with ui.row().classes("items-center gap-2 q-mb-md"):
-                ui.label("Load previous project").classes("text-caption")
-                load_project_select = ui.select(
-                    options=[""] + existing_projects,
-                    value="",
-                    on_change=lambda e: load_existing_project(e.value),
-                ).classes("w-64")
-        else:
-            load_project_select = None
+                def clone_settings(project_name: str):
+                    if not project_name:
+                        return
+                    meta_path = OUT_DIR / project_name / "meta.json"
+                    if not meta_path.exists():
+                        return
+                    with meta_path.open("r") as f:
+                        meta = json.load(f)
+                    source_file = meta.get("source_file", "")
+                    book_name = Path(source_file).name if source_file else ""
+                    if book_name and (BOOKS_DIR / book_name).exists():
+                        book_select.value = book_name
+                    else:
+                        book_select.value = ""
+                    output_name.value = project_name
+                    backend_radio.value = meta.get("backend", "piper")
+                    build_voice_widgets()
+                    if meta.get("voice_model"):
+                        vm_path = Path(meta["voice_model"])
+                        vm_name = vm_path.name if vm_path.exists() else ""
+                        if vm_name and backend_radio.value == "piper" and voice_model_select:
+                            voice_model_select.value = vm_name
+                    preset_select.value = meta.get("preset", "calm_longform")
+                    chapter_strategy.value = meta.get("chapter_strategy", "auto")
+                    chapter_confidence.value = float(meta.get("chapter_min_confidence", 0.5))
+                    normalize_check.value = meta.get("normalize", False)
+                    if meta.get("target_lufs"):
+                        target_lufs.value = float(meta["target_lufs"])
+                    safe_notify(f"Cloned settings from '{project_name}'.")
 
-        def load_existing_project(project_name: str):
-            if not project_name:
-                return
-            meta_path = OUT_DIR / project_name / "meta.json"
-            if not meta_path.exists():
-                return
-            import json
-            with meta_path.open("r") as f:
-                meta = json.load(f)
-            # Fill form fields with saved values
-            source_file = meta.get("source_file", "")
-            book_name = Path(source_file).name if source_file else ""
-            if book_name and (BOOKS_DIR / book_name).exists():
-                book_select.value = book_name
-            else:
-                book_select.value = ""
-            output_name.value = project_name
-            backend_radio.value = meta.get("backend", "piper")
-            # After changing backend, rebuild voice widgets
-            build_voice_widgets()
-            # Voice model for piper
-            if meta.get("voice_model"):
-                vm_path = Path(meta["voice_model"])
-                vm_name = vm_path.name if vm_path.exists() else ""
-                if vm_name and backend_radio.value == "piper" and voice_model_select:
-                    voice_model_select.value = vm_name
-            # Speaker wav is tricky (uploaded file), so skip.
-            # Preset, chapter strategy, etc.
-            preset_select.value = meta.get("preset", "calm_longform")
-            chapter_strategy.value = meta.get("chapter_strategy", "auto")
-            chapter_confidence.value = float(meta.get("chapter_min_confidence", 0.5))
-            normalize_check.value = meta.get("normalize", False)
-            if meta.get("target_lufs"):
-                target_lufs.value = float(meta["target_lufs"])
-            safe_notify(f"Loaded project '{project_name}'. You can adjust settings and continue.")
-
-        with ui.row().classes("w-full gap-8"):
-            with ui.column().classes("w-1/2"):
-                ui.label("📖 Source").classes("font-bold")
-                book_select = ui.select(
-                    label="Book from books/",
-                    options=[""] + list_books(),
-                    value="",
-                ).classes("w-full")
-                ui.upload(
-                    label="Or upload a .txt file",
-                    on_upload=lambda e: on_book_upload(e),
-                ).classes("w-full")
-                output_name = ui.input(
-                    label="Output project name", value="my-audiobook"
-                ).classes("w-full")
-            with ui.column().classes("w-1/2"):
-                ui.label("🎤 Voice").classes("font-bold")
-                backend_radio = ui.radio(
-                    ["piper", "xtts"], value="piper", on_change=lambda: build_voice_widgets()
-                ).props("inline")
-                voice_container = ui.column().classes("w-full")
-                voice_model_select: Optional[ui.select] = None
-
-                def build_voice_widgets():
-                    nonlocal voice_model_select
-                    voice_container.clear()
-                    if backend_radio.value == "piper":
-                        voice_model_select = ui.select(
-                            label="Piper voice model",
-                            options=[""] + list_voices(),
+                with ui.row().classes("w-full gap-8"):
+                    with ui.column().classes("col-12 col-md-6"):
+                        ui.label("📖 Source").classes("font-bold")
+                        book_select = ui.select(
+                            label="Book from books/",
+                            options=[""] + list_books(),
                             value="",
                         ).classes("w-full")
-                    else:
                         ui.upload(
-                            label="Reference speaker WAV",
-                            on_upload=lambda e: on_speaker_upload(e),
+                            label="Or upload a .txt file",
+                            on_upload=lambda e: on_book_upload(e),
                         ).classes("w-full")
-                        voice_model_select = None
+                        output_name = ui.input(
+                            label="Output project name", value="my-audiobook"
+                        ).classes("w-full")
+                    with ui.column().classes("col-12 col-md-6"):
+                        ui.label("🎤 Voice").classes("font-bold")
+                        backend_radio = ui.radio(
+                            ["piper", "xtts"], value="piper", on_change=lambda: build_voice_widgets()
+                        ).props("inline")
+                        voice_container = ui.column().classes("w-full")
+                        voice_model_select: Optional[ui.select] = None
 
-                build_voice_widgets()
-                preset_select = ui.select(
-                    label="Preset",
-                    options=["calm_longform", "calm_longform_v2"],
-                    value="calm_longform",
-                ).classes("w-full")
-                chapter_strategy = ui.select(
-                    label="Chapter detection",
-                    options=["auto", "markdown", "structured", "heuristic", "paragraph", "none"],
-                    value="auto",
-                ).classes("w-full")
-                chapter_confidence = ui.slider(min=0.0, max=1.0, step=0.05, value=0.5).classes("w-full")
-                ui.label().bind_text_from(chapter_confidence, "value", backward=lambda v: f"Confidence: {v:.2f}")
-                normalize_check = ui.checkbox("Normalize final book", value=False)
-                target_lufs = ui.number(
-                    label="Target LUFS", value=-16.0, step=0.5, format="%.1f"
-                ).bind_visibility_from(normalize_check, "value")
+                        def build_voice_widgets():
+                            nonlocal voice_model_select
+                            voice_container.clear()
+                            if backend_radio.value == "piper":
+                                voice_model_select = ui.select(
+                                    label="Piper voice model",
+                                    options=[""] + list_voices(),
+                                    value="",
+                                ).classes("w-full")
+                            else:
+                                ui.upload(
+                                    label="Reference speaker WAV",
+                                    on_upload=lambda e: on_speaker_upload(e),
+                                ).classes("w-full")
+                                voice_model_select = None
 
-        def on_book_upload(e):
-            nonlocal book_event
-            book_event = e
-            name = getattr(e.file, "name", "uploaded_book.txt") if hasattr(e, "file") else "uploaded_book.txt"
-            safe_notify(f"Book '{name}' selected", type="positive")
+                        build_voice_widgets()
+                        preset_select = ui.select(
+                            label="Preset",
+                            options=["calm_longform", "calm_longform_v2"],
+                            value="calm_longform",
+                        ).classes("w-full")
+                        chapter_strategy = ui.select(
+                            label="Chapter detection",
+                            options=["auto", "markdown", "structured", "heuristic", "paragraph", "none"],
+                            value="auto",
+                        ).classes("w-full")
+                        chapter_confidence = ui.slider(min=0.0, max=1.0, step=0.05, value=0.5).classes("w-full")
+                        ui.label().bind_text_from(chapter_confidence, "value", backward=lambda v: f"Confidence: {v:.2f}")
+                        normalize_check = ui.checkbox("Normalize final book", value=False)
+                        target_lufs = ui.number(
+                            label="Target LUFS", value=-16.0, step=0.5, format="%.1f"
+                        ).bind_visibility_from(normalize_check, "value")
 
-        def on_speaker_upload(e):
-            nonlocal speaker_event
-            speaker_event = e
-            name = getattr(e.file, "name", "speaker.wav") if hasattr(e, "file") else "speaker.wav"
-            safe_notify(f"Speaker WAV '{name}' selected", type="positive")
+                def on_book_upload(e):
+                    nonlocal book_event
+                    book_event = e
+                    name = getattr(e.file, "name", "uploaded_book.txt") if hasattr(e, "file") else "uploaded_book.txt"
+                    safe_notify(f"Book '{name}' selected", type="positive")
 
-        ui.button("Save & Continue", on_click=lambda: setup_next()).props("unelevated color=primary")
+                def on_speaker_upload(e):
+                    nonlocal speaker_event
+                    speaker_event = e
+                    name = getattr(e.file, "name", "speaker.wav") if hasattr(e, "file") else "speaker.wav"
+                    safe_notify(f"Speaker WAV '{name}' selected", type="positive")
 
+                ui.button("Save & Continue", on_click=lambda: setup_next()).props("unelevated color=primary")
+
+            # Prepare
+            with ui.column().classes("w-full") as prepare_card:
+                ui.label("2. Prepare Book").classes("text-h5 q-mb-md")
+                prepare_status = ui.label("Press the button to analyse the book.")
+                prepare_btn = ui.button("Prepare Book", icon="auto_stories")
+
+                async def on_prepare():
+                    proc = get_processor()
+                    if proc is None:
+                        safe_notify("No configuration saved.", type="negative")
+                        return
+                    prepare_btn.disable()
+                    try:
+                        await run_in_thread(proc.prepare_text)
+                        progress = proc.get_progress()
+                        prepare_status.set_text(f"✅ {progress.total_chapters} chapters found.")
+                        safe_notify("Book prepared!", type="positive")
+                        show_pipeline_step("synthesize")
+                    except Exception as e:
+                        safe_notify(f"Preparation failed: {e}", type="negative")
+                    finally:
+                        prepare_btn.enable()
+
+                prepare_btn.on_click(lambda: on_prepare())
+
+            # Synthesize
+            with ui.column().classes("w-full") as synth_card:
+                ui.label("3. Synthesize").classes("text-h5 q-mb-md")
+                prog = get_progress_dict()
+                status_label = ui.label(prog["status_message"])
+                overall_progress = ui.linear_progress(value=prog["overall_progress"]).props("size=20px")
+                chapter_progress = ui.linear_progress(value=prog["chapter_progress"]).props("size=15px color=secondary")
+                spinner = ui.spinner(size="lg").props("color=primary")
+                spinner.visible = prog.get("active", False)
+                chapter_status_html = ui.html(prog["chapter_statuses_html"]).classes("q-mb-md")
+
+                # processing indicator for before‑unload
+                ui.element("div").props("id=processing-indicator").classes("hidden")
+
+                next_btn = ui.button("Process Next Chapter", icon="skip_next", on_click=lambda: process_one())
+                all_btn = ui.button("Process All Remaining", icon="fast_forward", on_click=lambda: process_all())
+                graceful_stop_btn = ui.button("Stop after current chunk", icon="pause_circle", color="warning", on_click=lambda: graceful_stop())
+                abort_btn = ui.button("Abort (now)", icon="stop", color="negative", on_click=lambda: abort_now())
+                graceful_stop_btn.visible = False
+                abort_btn.visible = False
+
+                # Timer to refresh UI from shared state
+                async def refresh_ui():
+                    pd = get_progress_dict()
+                    status_label.set_text(pd["status_message"])
+                    overall_progress.set_value(pd["overall_progress"])
+                    chapter_progress.set_value(pd["chapter_progress"])
+                    spinner.visible = pd.get("active", False)
+                    chapter_status_html.set_content(pd["chapter_statuses_html"])
+                    # Show/hide stop buttons based on active state
+                    graceful_stop_btn.visible = pd.get("active", False)
+                    abort_btn.visible = pd.get("active", False)
+                    next_btn.disable() if pd.get("active") else next_btn.enable()
+                    all_btn.disable() if pd.get("active") else all_btn.enable()
+
+                ui.timer(1.0, lambda: refresh_ui())
+
+                async def process_one():
+                    await process_chapters(one=True)
+
+                async def process_all():
+                    await process_chapters(one=False)
+
+                async def process_chapters(one: bool):
+                    proc = get_processor()
+                    if proc is None or proc.book_text is None:
+                        safe_notify("No prepared book.", type="negative")
+                        return
+                    set_progress_dict({"active": True, "overall_progress": 0, "chapter_progress": 0, "status_message": "Starting...", "estimated_time_remaining": "", "chapter_statuses_html": ""})
+                    try:
+                        while True:
+                            try:
+                                await run_in_thread(proc.process_next_chapter)
+                            except AbortException:
+                                safe_notify("Processing stopped.", type="warning")
+                                break
+                            update_progress_from_processor(proc)
+                            if proc.is_complete():
+                                safe_notify("All chapters synthesised!", type="positive")
+                                show_pipeline_step("finalize")
+                                break
+                            if one:
+                                break
+                            await asyncio.sleep(0.1)
+                    except Exception as e:
+                        safe_notify(f"Chapter error: {e}", type="negative")
+                    finally:
+                        set_progress_dict({**get_progress_dict(), "active": False})
+
+                def graceful_stop():
+                    proc = get_processor()
+                    if proc:
+                        proc.request_graceful_stop()
+
+                def abort_now():
+                    proc = get_processor()
+                    if proc:
+                        proc.abort()
+
+            # Finalize
+            with ui.column().classes("w-full") as finalize_card:
+                ui.label("4. Finalize Book").classes("text-h5 q-mb-md")
+                finalize_status = ui.label("Synthesis complete. Click to finalize.")
+                finalize_btn = ui.button("Finalize Book", icon="done_all")
+                audio_player = ui.audio("").classes("hidden")
+
+                async def on_finalize():
+                    proc = get_processor()
+                    if proc is None:
+                        safe_notify("No active project.", type="negative")
+                        return
+                    finalize_btn.disable()
+                    try:
+                        await run_in_thread(proc.finalize_book)
+                        book_wav = proc.output_dir / "book.wav"
+                        if book_wav.exists():
+                            audio_player.set_source(str(book_wav))
+                            audio_player.classes(remove="hidden")
+                            finalize_status.set_text("✅ Audiobook ready!")
+                            safe_notify("Book finalized!", type="positive")
+                            show_view("projects")
+                    except Exception as e:
+                        safe_notify(f"Finalization error: {e}", type="negative")
+                    finally:
+                        finalize_btn.enable()
+
+                finalize_btn.on_click(lambda: on_finalize())
+
+        # PROJECTS
+        with ui.column().classes("w-full") as projects_card:
+            projects_card.visible = False
+            with ui.row().classes("w-full justify-between items-center"):
+                ui.label("📚 My Projects").classes("text-h5")
+                ui.button("← Back to Home", on_click=lambda: show_view("home")).props("flat")
+            with ui.row().classes("items-center gap-2 q-mb-md"):
+                project_select = ui.select(
+                    label="Select a project",
+                    options=[""] + list_projects(),
+                    on_change=lambda e: refresh_review(e.value),
+                ).classes("flex-grow")
+                ui.button("Refresh list", icon="refresh", on_click=lambda: refresh_project_list()).props("flat")
+            review_area = ui.column()
+
+            def refresh_project_list():
+                project_select.options = [""] + list_projects()
+                project_select.value = ""
+                review_area.clear()
+
+            def refresh_review(project_name: str):
+                review_area.clear()
+                if not project_name:
+                    return
+                project_path = OUT_DIR / project_name
+                is_incomplete = (project_path / "processing_progress.json").exists() and not (project_path / "meta.json").exists()
+                with review_area:
+                    if is_incomplete:
+                        ui.label("⚠️ This project is **incomplete**.").classes("text-orange q-mb-sm")
+                        ui.button("Resume Processing", on_click=lambda p=project_name: resume_project(p)).props("color=orange icon=play_arrow")
+                        ui.separator()
+                    else:
+                        project = BookProject(project_path)
+                        meta = project.load_meta()
+                        index = project.load_index()
+                        ui.label(f"Backend: {meta.get('backend','?')}  |  Chunks: {len(index)}")
+                        book_wav = project_path / "book.wav"
+                        if book_wav.exists():
+                            ui.audio(str(book_wav)).classes("w-full")
+                        chapters = sorted({m["chapter_index"] for m in index})
+                        for ch in chapters:
+                            ch_wav = project_path / "chapters" / f"chapter_{ch+1:02d}.wav"
+                            with ui.expansion(f"Chapter {ch+1}", icon="menu_book").classes("w-full"):
+                                if ch_wav.exists():
+                                    ui.audio(str(ch_wav))
+                                for m in index:
+                                    if m["chapter_index"] == ch:
+                                        chunk_wav = project_path / "chunks" / m["file"]
+                                        if chunk_wav.exists():
+                                            ui.label(f"Chunk {m['id']:05d}").classes("text-caption")
+                                            ui.audio(str(chunk_wav))
+
+    # ── View helper ──
+    def show_view(view: str):
+        home_card.visible = (view == "home")
+        projects_card.visible = (view == "projects")
+        pipeline_card.visible = (view == "pipeline")
+        if view == "pipeline":
+            proc = get_processor()
+            if proc:
+                if proc.is_complete():
+                    show_pipeline_step("finalize")
+                elif proc.book_text and proc.chapter_progress:
+                    show_pipeline_step("synthesize")
+                else:
+                    show_pipeline_step("prepare")
+            else:
+                show_pipeline_step("setup")
+
+    def show_pipeline_step(step: str):
+        setup_card.visible = (step == "setup")
+        prepare_card.visible = (step == "prepare")
+        synth_card.visible = (step == "synthesize")
+        finalize_card.visible = (step == "finalize")
+        pipeline_step_label.set_text(f"Step: {step.title()}")
+
+    # ── Start New Project ──
+    def start_new_project():
+        set_processor(None)
+        book_select.value = ""
+        output_name.value = "my-audiobook"
+        backend_radio.value = "piper"
+        build_voice_widgets()
+        preset_select.value = "calm_longform"
+        chapter_strategy.value = "auto"
+        chapter_confidence.value = 0.5
+        normalize_check.value = False
+        target_lufs.value = -16.0
+        show_view("pipeline")
+        show_pipeline_step("setup")
+
+    # ── Setup → Prepare ──
     async def setup_next():
-        nonlocal processor, book_event, speaker_event
+        nonlocal book_event, speaker_event
         errors = []
         book_path: Optional[Path] = None
         if book_event is not None:
@@ -284,7 +564,7 @@ async def main_page():
                 voice_model=voice_model,
                 speaker_wav=speaker_wav,
             )
-            processor = IncrementalProcessor(
+            proc = IncrementalProcessor(
                 input_file=book_path,
                 output_dir=OUT_DIR / output_name.value.strip(),
                 backend=tts_backend,
@@ -294,196 +574,21 @@ async def main_page():
                 normalize=normalize_check.value,
                 target_lufs=target_lufs.value,
                 voice_model=voice_model,
-                speaker_wav=speaker_wav,  
+                speaker_wav=speaker_wav,
             )
-            processor.backend_name = backend
+            proc.backend_name = backend
+            set_processor(proc)
             safe_notify("Configuration saved!", type="positive")
-            set_step("Prepare")
+            show_pipeline_step("prepare")
         except Exception as e:
             safe_notify(f"Failed to create processor: {e}", type="negative")
 
-    # ████████████████████████ Prepare Card ████████████████████████
-    with ui.column().classes("w-full") as prepare_card:
-        step_cards["Prepare"] = prepare_card
-        ui.label("2. Prepare Book").classes("text-h6")
-        prepare_status = ui.label("Press the button to analyse the book.")
-        prepare_btn = ui.button("Prepare Book", icon="auto_stories")
-
-        async def on_prepare():
-            nonlocal processor
-            if processor is None:
-                safe_notify("No configuration saved.", type="negative")
-                return
-            prepare_btn.disable()
-            try:
-                await run_in_thread(processor.prepare_text)
-                progress = processor.get_progress()
-                prepare_status.set_text(f"✅ {progress.total_chapters} chapters found.")
-                safe_notify("Book prepared!", type="positive")
-                set_step("Synthesize")
-            except Exception as e:
-                safe_notify(f"Preparation failed: {e}", type="negative")
-            finally:
-                prepare_btn.enable()
-
-        prepare_btn.on_click(lambda: on_prepare())
-
-    # ████████████████████████ Synthesize Card ████████████████████████
-    with ui.column().classes("w-full") as synth_card:
-        step_cards["Synthesize"] = synth_card
-        ui.label("3. Synthesize").classes("text-h6")
-        status_label = ui.label("Ready")
-        overall_progress = ui.linear_progress(value=0).props("size=20px")
-        chapter_progress = ui.linear_progress(value=0).props("size=15px color=secondary")
-        spinner = ui.spinner(size="lg").props("color=primary")
-        spinner.visible = False
-        # Use ui.html to display chapter badges (HTML)
-        chapter_status_html = ui.html("").classes("q-mb-md")
-
-        timer = ui.timer(1.0, lambda: update_progress_display(), active=False)
-
-        def update_progress_display():
-            nonlocal processor
-            if not processor:
-                return
-            progress = processor.get_progress()
-            overall_progress.set_value(progress.overall_progress)
-            chapter_progress.set_value(progress.chapter_progress)
-            status_label.set_text(f"{progress.status_message} (ETA: {progress.estimated_time_remaining})")
-            if processor.chapter_progress:
-                html_parts = ['<div style="display:flex; flex-wrap:wrap; gap:8px;">']
-                for ch in processor.chapter_statuses:
-                    badge = "⚪"
-                    if ch["error"]:
-                        badge = "🔴"
-                    elif ch["processed"]:
-                        badge = "🟢"
-                    else:
-                        badge = "🔵" if ch["chunks_done"] > 0 else "⚪"
-                    status_text = f"{badge} Ch{ch['index']}"
-                    if ch["error"]:
-                        status_text += " ❌"
-                    html_parts.append(
-                        f'<span style="padding:4px 8px; border:1px solid #ccc; border-radius:4px; font-size:0.85rem;">{status_text}</span>'
-                    )
-                html_parts.append('</div>')
-                chapter_status_html.set_content(''.join(html_parts))
-
-        stop_flag = False
-        next_btn = ui.button("Process Next Chapter", icon="skip_next")
-        all_btn = ui.button("Process All Remaining", icon="fast_forward")
-        stop_btn = ui.button("Stop", icon="stop", color="negative")
-        stop_btn.visible = False
-
-        async def _process_chapter():
-            nonlocal processor
-            if processor is None or processor.book_text is None:
-                safe_notify("No prepared book.", type="negative")
-                return False
-            try:
-                await run_in_thread(processor.process_next_chapter)
-                return True
-            except AbortException:
-                safe_notify("Processing stopped by user.", type="warning")
-                return False
-            except Exception as e:
-                safe_notify(f"Chapter error: {e}", type="negative")
-                return False
-
-        async def process_one():
-            nonlocal stop_flag
-            stop_flag = False
-            start_processing_ui()
-            success = await _process_chapter()
-            stop_processing_ui()
-            if success:
-                update_progress_display()
-                if processor and processor.is_complete():
-                    set_step("Finalize")
-
-        async def process_all():
-            nonlocal stop_flag
-            stop_flag = False
-            start_processing_ui()
-            all_btn.disable()
-            try:
-                while processor and not processor.is_complete() and not stop_flag:
-                    success = await _process_chapter()
-                    if not success:
-                        break
-                    update_progress_display()
-                    await asyncio.sleep(0.1)
-            except Exception:
-                safe_notify("Processing stopped unexpectedly.", type="negative")
-            finally:
-                all_btn.enable()
-                stop_processing_ui()
-                update_progress_display()
-                if processor and processor.is_complete():
-                    safe_notify("All chapters synthesised!", type="positive")
-                    set_step("Finalize")
-
-        def start_processing_ui():
-            spinner.visible = True
-            stop_btn.visible = True
-            timer.activate()
-            update_progress_display()
-
-        def stop_processing_ui():
-            spinner.visible = False
-            stop_btn.visible = False
-            timer.deactivate()
-            update_progress_display()
-
-        def stop_handler():
-            nonlocal stop_flag
-            if processor:
-                processor.abort()
-            stop_flag = True
-
-        next_btn.on_click(lambda: process_one())
-        all_btn.on_click(lambda: process_all())
-        stop_btn.on_click(lambda: stop_handler())
-
-    # ████████████████████████ Finalize Card ████████████████████████
-    with ui.column().classes("w-full") as finalize_card:
-        step_cards["Finalize"] = finalize_card
-        ui.label("4. Finalize Book").classes("text-h6")
-        finalize_status = ui.label("Synthesis complete. Click to finalize.")
-        finalize_btn = ui.button("Finalize Book", icon="done_all")
-        audio_player = ui.audio("").classes("hidden")
-
-        async def on_finalize():
-            nonlocal processor
-            if processor is None:
-                safe_notify("No active project.", type="negative")
-                return
-            finalize_btn.disable()
-            try:
-                await run_in_thread(processor.finalize_book)
-                book_wav = processor.output_dir / "book.wav"
-                if book_wav.exists():
-                    audio_player.set_source(str(book_wav))
-                    audio_player.classes(remove="hidden")
-                    finalize_status.set_text("✅ Audiobook ready!")
-                    safe_notify("Book finalized!", type="positive")
-                    set_step("Review")
-            except Exception as e:
-                safe_notify(f"Finalization error: {e}", type="negative")
-            finally:
-                finalize_btn.enable()
-
-        finalize_btn.on_click(lambda: on_finalize())
-
+    # ── Resume project ──
     async def resume_project(project_name: str):
-        """Re‑create processor from saved progress, with smart fallback for old projects."""
-        nonlocal processor, book_event, speaker_event
         progress_file = OUT_DIR / project_name / "processing_progress.json"
         if not progress_file.exists():
             safe_notify("No progress data found.", type="negative")
             return
-
-        import json
         try:
             with progress_file.open("r") as f:
                 data = json.load(f)
@@ -491,48 +596,21 @@ async def main_page():
             safe_notify(f"Failed to read progress file: {e}", type="negative")
             return
 
-        # ---- 1. Backend type detection ----
         backend_type = data.get("backend_name", "unknown")
         if backend_type == "unknown" or backend_type is None:
-            # Try to infer from saved voice files
             if data.get("speaker_wav"):
                 backend_type = "xtts"
             elif data.get("voice_model"):
                 backend_type = "piper"
             else:
-                # Last resort: check if any chunk files are 24000 Hz (XTTS) vs 22050 (Piper)
-                # For simplicity, we'll just ask the user
-                safe_notify("Old project – cannot detect backend. Please re‑supply voice reference.", type="warning")
-                # Fill Setup with project name and book, then switch
-                output_name.value = project_name
-                if data.get("input_file"):
-                    book_select.value = Path(data["input_file"]).name
-                set_step("Setup")
+                safe_notify("Old project – cannot detect backend. Start a new project.", type="warning")
                 return
 
-        # ---- 2. Voice paths ----
         voice_model_path = data.get("voice_model")
         speaker_wav_path = data.get("speaker_wav")
         voice_model = Path(voice_model_path) if voice_model_path else None
         speaker_wav = Path(speaker_wav_path) if speaker_wav_path else None
 
-        # ---- 3. If speaker_wav path is missing but we know it's XTTS, try to guess ----
-        if backend_type == "xtts" and speaker_wav is None:
-            # Common fallback: look for the uploaded speaker WAV in temp/ (we saved it there)
-            # Or check if the user has a known file in voices/
-            # We'll just ask the user to re‑upload
-            safe_notify("XTTS project is missing speaker WAV. Please upload it again.", type="warning")
-            output_name.value = project_name
-            set_step("Setup")
-            return
-
-        if backend_type == "piper" and voice_model is None:
-            safe_notify("Piper project is missing voice model. Please select one.", type="warning")
-            output_name.value = project_name
-            set_step("Setup")
-            return
-
-        # ---- 4. Recreate TTS backend ----
         try:
             tts_backend = await run_in_thread(
                 get_backend,
@@ -544,9 +622,8 @@ async def main_page():
             safe_notify(f"Failed to recreate TTS backend: {e}", type="negative")
             return
 
-        # ---- 5. Rebuild processor and load progress ----
         try:
-            processor = IncrementalProcessor(
+            proc = IncrementalProcessor(
                 input_file=Path(data["input_file"]),
                 output_dir=OUT_DIR / project_name,
                 backend=tts_backend,
@@ -558,9 +635,9 @@ async def main_page():
                 voice_model=voice_model,
                 speaker_wav=speaker_wav,
             )
-            processor.backend_name = backend_type
-            await run_in_thread(processor.prepare_text)
-            loaded = await run_in_thread(processor.load_progress)
+            proc.backend_name = backend_type
+            await run_in_thread(proc.prepare_text)
+            loaded = await run_in_thread(proc.load_progress)
             if not loaded:
                 safe_notify("No previous progress could be loaded.", type="warning")
                 return
@@ -568,75 +645,28 @@ async def main_page():
             safe_notify(f"Failed to resume: {e}", type="negative")
             return
 
-        safe_notify(f"Resumed '{project_name}' – ready to continue.", type="positive")
-        set_step("Synthesize")
+        set_processor(proc)
+        update_progress_from_processor(proc)
+        safe_notify(f"Resumed '{project_name}'", type="positive")
+        show_view("pipeline")
+        show_pipeline_step("synthesize")
 
-    # ████████████████████████ Review Card ████████████████████████
-    with ui.column().classes("w-full card") as review_card:
-        step_cards["Review"] = review_card
-        ui.label("5. Review Existing Projects").classes("text-h5 q-mb-md")
-
-        # -- widgets we update directly --
-        with ui.row().classes("items-center gap-2"):
-            project_select = ui.select(
-                label="Select a project",
-                options=[""] + list_projects(),
-                on_change=lambda e: refresh_review(e.value),
-            ).classes("flex-grow")
-            ui.button("Refresh list", icon="refresh",
-                      on_click=lambda: refresh_project_list()).props("flat")
-
-        review_area = ui.column()
-
-        def refresh_project_list():
-            """Reload the list of projects (e.g. after finalising a new book)."""
-            project_select.options = [""] + list_projects()
-            project_select.value = ""   # reset selection
-            review_area.clear()
-
-        def refresh_review(project_name: str):
-            review_area.clear()
-            if not project_name:
-                return
-            project_path = OUT_DIR / project_name
-            is_incomplete = (project_path / "processing_progress.json").exists() and not (project_path / "meta.json").exists()
-
-            with review_area:
-                if is_incomplete:
-                    ui.label("⚠️ This project is **incomplete** (processing was cancelled or stopped).").classes("text-orange q-mb-sm")
-                    ui.button("Resume Processing", on_click=lambda p=project_name: resume_project(p)).props("color=orange icon=play_arrow")
-                    ui.separator()
-                else:
-                    project = BookProject(project_path)
-                    meta = project.load_meta()
-                    index = project.load_index()
-                    ui.label(f"Backend: {meta.get('backend','?')}  |  Chunks: {len(index)}")
-                    book_wav = project_path / "book.wav"
-                    if book_wav.exists():
-                        ui.audio(str(book_wav)).classes("w-full")
-                    chapters = sorted({m["chapter_index"] for m in index})
-                    for ch in chapters:
-                        ch_wav = project_path / "chapters" / f"chapter_{ch+1:02d}.wav"
-                        with ui.expansion(f"Chapter {ch+1}", icon="menu_book").classes("w-full"):
-                            if ch_wav.exists():
-                                ui.audio(str(ch_wav))
-                            for m in index:
-                                if m["chapter_index"] == ch:
-                                    chunk_wav = project_path / "chunks" / m["file"]
-                                    if chunk_wav.exists():
-                                        ui.label(f"Chunk {m['id']:05d}").classes("text-caption")
-                                        ui.audio(str(chunk_wav))
-
-        # auto‑refresh when the Review step is entered
-        def on_step_change():
-            if step_state[0] == "Review":
-                refresh_project_list()
-
-        step_change_callbacks.append(on_step_change)
+    # ── Initial view ──
+    # If there's an active processor, jump straight to pipeline
+    active_proc = get_processor()
+    if active_proc and active_proc.book_text:
+        show_view("pipeline")
+        if active_proc.is_complete():
+            show_pipeline_step("finalize")
+        else:
+            show_pipeline_step("synthesize")
+            update_progress_from_processor(active_proc)
+    else:
+        show_view("home")
 
     # Footer
     ui.markdown("---")
-    ui.markdown("BookForge · MIT License · running locally")
+    ui.markdown("Audio‑Files Studio · MIT License · running locally")
 
 # ---------------------------------------------------------------------------
 # Entrypoint
@@ -645,8 +675,8 @@ if __name__ in {"__main__", "__mp_main__"}:
     ui.run(
         host="0.0.0.0",
         port=8501,
-        title="BookForge Studio",
-        favicon="🔨",
+        title="Audio‑Files Studio",
+        favicon="🎙️",
         reload=False,
         show=False,
     )

@@ -99,6 +99,7 @@ class IncrementalProcessor:
         self.all_chunks: List[Chunk] = []
         self.start_time = datetime.now()
         self.stop_requested = False
+        self.graceful_stop_requested = False   # <-- add this line
 
         # Logging
         self.logger = logging.getLogger('bookforge.processor')
@@ -120,6 +121,11 @@ class IncrementalProcessor:
     def abort(self):
         self.stop_requested = True
         self.logger.warning("Abort requested by user")
+        
+    def request_graceful_stop(self):
+        """Request processing to stop after the current chunk finishes."""
+        self.graceful_stop_requested = True
+        self.logger.info("Graceful stop requested")
 
     def prepare_text(self) -> None:
         if self.book_text is not None:
@@ -335,6 +341,12 @@ class IncrementalProcessor:
                 chunk_wav_files.append(out_wav)
                 cp.processed_chunks += 1
                 self.all_chunks.append(chunk)
+                                # Check for graceful stop after completing the current chunk
+                if self.graceful_stop_requested:
+                    self._save_progress()
+                    self.stop_requested = True
+                    raise AbortException("Processing stopped after current chunk")
+                
                 self.logger.debug(f"Chunk {chunk.id} done")
             except Exception as e:
                 cp.error_message = f"Chunk {chunk.id}: {e}"

@@ -1,62 +1,86 @@
-# BookForge (AI READ ME - For AI, by AI)
 
-> **Local, GPU-accelerated audiobook creation with Piper TTS and XTTS v2**
+---
 
-BookForge converts plain text files into high-quality audiobooks using open-source neural text-to-speech engines. Run entirely on your own machine — no cloud APIs, no subscriptions, full control.
+## 📋 Documentation audit
+
+| File | Status | Recommendation |
+|------|--------|----------------|
+| **WINDOWS_QUICK_START.md** | Contains Streamlit commands, no longer accurate. | **Delete** – the current Docker workflow is cross‑platform and simpler; no separate Windows guide needed. |
+| **ASSESSMENT_REPORT.md** | Historical incident report from early development. | **Delete** – it documents resolved issues, not useful for users. |
+| **CHANGELOG.md** | Lists only the initial scaffold (v0.1.0). | **Update** – add recent milestones (XTTS backend, NiceGUI UI, Docker integration, resumable projects). |
+| **UI_PROCESSING_FEATURE.md** | Describes the old Streamlit UI approach. | **Delete** – the NiceGUI UI supersedes it; the incremental processing is now part of the core. |
+| **HOW_BOOKFORGE_WORKS.md** | Incomplete architecture document (ends mid‑sentence). | **Remove** until it can be finished. The architecture is better explained in the updated README itself. |
+| **README.md** (root) | The main project README. Still references Streamlit, old Docker commands, and Piper as default. Needs a full rewrite. | **Rewrite** to reflect NiceGUI UI, Docker Compose, XTTS default, and current features. |
+
+---
+
+## ✅ Updated README.md
+
+Below is a comprehensive, up‑to‑date README that matches the current code (NiceGUI UI, Docker Compose, XTTS default, etc.). Replace the contents of your root `README.md` with this.
+
+```markdown
+# 🎙️ Audio‑Files Studio
+
+> **Local, GPU‑accelerated audiobook creation with XTTS v2 and Piper TTS**
+
+Create high‑quality audiobooks from plain text files using open‑source neural
+text‑to‑speech engines. Everything runs on your own machine – no cloud, no
+subscriptions, full control.
 
 ## ✨ Features
 
-- 🎙️ **Dual TTS backends**: Fast Piper TTS or expressive XTTS v2 voice cloning
-- 🐳 **Docker support**: Reproducible CUDA environment for XTTS on Windows/Linux
-- 📖 **Smart chapter detection**: Auto, markdown, structured, heuristic strategies
-- 🎵 **Incremental processing**: Chapter-by-chapter synthesis with progress tracking
-- 🖥️ **Streamlit UI**: Browser-based interface for setup, processing, and review
-- 🔄 **Chunk-level control**: Review and re-synthesize individual segments
-- 🎚️ **Audio normalization**: EBU R128 loudness standardization
-- 🗂️ **Project store**: Resume interrupted sessions, keep organized outputs
+- **Dual TTS backends** – high‑quality XTTS v2 with voice cloning, or fast Piper TTS
+- **NiceGUI web interface** – clean, step‑by‑step audiobook creation
+- **Resumable projects** – stop and resume long syntheses without losing progress
+- **Smart chapter detection** – auto, markdown, structured, and heuristic strategies
+- **Incremental processing** – chapter‑by‑chapter synthesis with live progress
+- **Audio normalisation** – EBU R128 loudness standardisation
+- **Docker‑based** – reproducible CUDA environment for Windows, Linux, and Mac
 
-## 🚀 Quick Start
-
-### With Docker (Recommended for XTTS)
+## 🚀 Quick Start (Docker)
 
 ```bash
-# Clone and navigate
 git clone https://github.com/Git-Lister/BookForge-dev.git
 cd BookForge-dev/bookforge
 
-# Build the Docker image
-docker build -t bookforge-xtts .
+# Build the image
+docker-compose build
 
-# Run Streamlit UI
-docker run --gpus all --rm -it -p 8501:8501 -v "%cd%:/app" bookforge-xtts
+# Start the studio
+docker-compose up
 ```
 
-Open `http://localhost:8501` and follow the UI workflow.
+Open **http://localhost:8501** and follow the on‑screen wizard.
 
-### Without Docker (Piper only)
+> **Note:** The first time you use XTTS, the model (~1.9 GB) will be downloaded
+> and cached inside the `models/` directory.
+
+### Docker‑free installation (Piper only)
 
 ```bash
 cd bookforge
 python -m venv .venv
-.venv\Scripts\activate  # Windows
+source .venv/bin/activate   # or .venv\Scripts\activate on Windows
 pip install -e ".[dev,piper,ui]"
-streamlit run src/bookforge/ui.py
+python src/bookforge/ui_nicegui.py
 ```
 
-## 📚 Documentation
+You can then select the Piper backend and use any `.onnx` voice model placed
+in the `voices/` folder.
 
-- **[Installation Guide](bookforge/README.md)** — Full setup for Windows/Linux/Mac
-- **[Docker Setup](bookforge/docs/DOCKER_SETUP.md)** — XTTS + CUDA environment
-- **[How BookForge Works](bookforge/docs/HOW_BOOKFORGE_WORKS.md)** — Architecture deep-dive
-- **[Streamlit UI Guide](bookforge/docs/STREAMLIT_SETUP.md)** — Using the web interface
-- **[Contributing](bookforge/CONTRIBUTING.md)** — Development guidelines
+## 📖 Documentation
+
+| Document | Description |
+|----------|-------------|
+| **[bookforge/README.md](bookforge/README.md)** | Full installation and usage guide (CLI + UI) |
+| **[CONTRIBUTING.md](bookforge/CONTRIBUTING.md)** | Development and testing instructions |
 
 ## 🎯 Use Cases
 
-- **Academic audiobooks** for complex theory texts
-- **Personal narration** of public-domain literature
-- **Accessibility** tools for visual impairments
-- **Rapid prototyping** of TTS workflows
+- Personal audiobook creation from public domain texts
+- Academic paper narration
+- Accessibility aids
+- Prototyping TTS voice clones
 
 ## 🛠️ Tech Stack
 
@@ -64,22 +88,46 @@ streamlit run src/bookforge/ui.py
 |---|---|
 | TTS (quality) | Coqui XTTS v2 |
 | TTS (speed) | Piper TTS |
-| Deep learning | PyTorch + CUDA 12.1 |
-| UI | Streamlit |
+| UI | NiceGUI |
 | CLI | Typer |
-| Container | Docker (NVIDIA CUDA base) |
+| Deep learning | PyTorch + CUDA 12.1 |
+| Container | Docker Compose (NVIDIA GPU) |
 | Audio | ffmpeg, libsndfile |
+| Text processing | Custom pipeline (cleaner, chunker, sanitizer) |
+
+## 📦 Project Structure
+
+```
+bookforge/
+├── books/              ← Input .txt files
+├── voices/             ← Piper ONNX models & XTTS reference WAVs
+├── out/                ← Output audiobook projects
+├── presets/            ← Voice & pacing YAML presets
+├── src/bookforge/
+│   ├── ui_nicegui.py   ← NiceGUI web interface
+│   ├── incremental_processor.py  ← Resumable processing engine
+│   ├── tts/            ← Backend factory, Piper & XTTS wrappers
+│   ├── audio/          ← Concatenation, normalisation
+│   ├── ingest/         ← Text loaders (txt, epub, pdf)
+└── tests/              ← Basic test suite
+```
+
+## 🤝 Contributing
+
+Pull requests welcome! Please read [CONTRIBUTING.md](bookforge/CONTRIBUTING.md)
+for guidelines on setting up a development environment, running tests, and
+submitting changes.
 
 ## 📝 License
 
-MIT License — see [LICENSE](bookforge/LICENSE)
+MIT License – see [LICENSE](bookforge/LICENSE)
 
 ## 🙏 Acknowledgments
 
 - [Coqui TTS](https://github.com/coqui-ai/TTS) for XTTS v2
 - [Piper TTS](https://github.com/rhasspy/piper) for lightweight synthesis
-- [rhasspy](https://github.com/rhasspy) for voice models
+- [NiceGUI](https://nicegui.io/) for the web framework
+```
 
 ---
 
-**Status:** Active development | Python 3.11+ | Docker recommended for XTTS

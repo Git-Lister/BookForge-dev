@@ -74,16 +74,22 @@ class IncrementalProcessor:
         chapter_min_confidence: float = 0.5,
         normalize: bool = False,
         target_lufs: float = -16.0,
+        voice_model: Optional[Path] = None,
+        speaker_wav: Optional[Path] = None,
     ):
         self.input_file = input_file
         self.output_dir = output_dir
         self.backend = backend
-        self.backend_name = "unknown"          # will be set by UI/CLI
+        self.backend_name = "unknown"
         self.preset = preset
         self.chapter_strategy = chapter_strategy
         self.chapter_min_confidence = chapter_min_confidence
         self.normalize = normalize
         self.target_lufs = target_lufs
+
+        # Store voice info for resumption
+        self.voice_model = voice_model
+        self.speaker_wav = speaker_wav
 
         self.project = BookProject(output_dir)
         self.config = PresetConfig.load(preset)
@@ -260,6 +266,46 @@ class IncrementalProcessor:
         ]
 
     # ------------------------------------------------------------------
+    # Resume support
+    # ------------------------------------------------------------------
+    def load_progress(self) -> bool:
+        """Load saved progress from processing_progress.json. Returns True if loaded."""
+        if not self.progress_file.exists():
+            return False
+        with self.progress_file.open("r") as f:
+            data = json.load(f)
+
+        # Restore voice info (if present)
+        self.backend_name = data.get("backend_name", self.backend_name)
+        if data.get("voice_model"):
+            self.voice_model = Path(data["voice_model"])
+        if data.get("speaker_wav"):
+            self.speaker_wav = Path(data["speaker_wav"])
+
+        # Ensure text is prepared
+        if self.book_text is None:
+            self.prepare_text()
+
+        # Restore chapter progress
+        saved_cp = data.get("chapter_progress", [])
+        for i, cp in enumerate(self.chapter_progress):
+            if i < len(saved_cp):
+                cp.processed_chunks = saved_cp[i].get("processed_chunks", 0)
+                cp.chapter_audio_created = saved_cp[i].get("chapter_audio_created", False)
+                cp.error_message = saved_cp[i].get("error_message", None)
+                # Rebuild chunk list if missing
+                if not cp.chunks and cp.cleaned_text:
+                    starting_id = len(self.all_chunks) if self.all_chunks else saved_cp[i].get("chunks_count", 0)
+                    cp.chunks = chunk_chapter(
+                        cp.cleaned_text,
+                        self.config,
+                        cp.chapter_index,
+                        starting_chunk_id=starting_id,
+                    )
+        self.logger.info("Resumed progress from previous session")
+        return True
+
+    # ------------------------------------------------------------------
     # Internals
     # ------------------------------------------------------------------
     def _process_chapter(self, cp: ChapterProgress) -> None:
@@ -303,27 +349,30 @@ class IncrementalProcessor:
 
     def _save_progress(self) -> None:
         progress_data = {
-            'input_file': str(self.input_file),
-            'output_dir': str(self.output_dir),
-            'preset': self.preset,
-            'chapter_strategy': self.chapter_strategy,
-            'chapter_min_confidence': self.chapter_min_confidence,
-            'normalize': self.normalize,
-            'target_lufs': self.target_lufs,
-            'chapter_progress': [
+            "input_file": str(self.input_file),
+            "output_dir": str(self.output_dir),
+            "backend_name": self.backend_name,
+            "voice_model": str(self.voice_model) if self.voice_model else None,
+            "speaker_wav": str(self.speaker_wav) if self.speaker_wav else None,
+            "preset": self.preset,
+            "chapter_strategy": self.chapter_strategy,
+            "chapter_min_confidence": self.chapter_min_confidence,
+            "normalize": self.normalize,
+            "target_lufs": self.target_lufs,
+            "chapter_progress": [
                 {
-                    'chapter_index': cp.chapter_index,
-                    'processed_chunks': cp.processed_chunks,
-                    'chapter_audio_created': cp.chapter_audio_created,
-                    'error_message': cp.error_message,
-                    'chunks_count': len(cp.chunks),
+                    "chapter_index": cp.chapter_index,
+                    "processed_chunks": cp.processed_chunks,
+                    "chapter_audio_created": cp.chapter_audio_created,
+                    "error_message": cp.error_message,
+                    "chunks_count": len(cp.chunks),
                 }
                 for cp in self.chapter_progress
             ],
-            'all_chunks_count': len(self.all_chunks),
-            'start_time': self.start_time.isoformat(),
+            "all_chunks_count": len(self.all_chunks),
+            "start_time": self.start_time.isoformat(),
         }
-        with self.progress_file.open('w') as f:
+        with self.progress_file.open("w") as f:
             json.dump(progress_data, f, indent=2)
 
     def _format_time_remaining(self, seconds: float) -> str:

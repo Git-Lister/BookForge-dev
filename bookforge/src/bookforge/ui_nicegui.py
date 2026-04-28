@@ -10,7 +10,7 @@ from typing import Any, Optional
 
 from nicegui import ui
 
-from bookforge.incremental_processor import IncrementalProcessor, AbortException
+from bookforge.incremental_processor import AbortException, IncrementalProcessor
 from bookforge.project import BookProject
 from bookforge.tts.factory import get_backend
 
@@ -34,11 +34,17 @@ def list_voices() -> list[str]:
     return sorted([p.name for p in VOICES_DIR.glob("*.onnx") if p.is_file()])
 
 def list_projects() -> list[str]:
-    # Only projects that have meta.json
-    return sorted([
+    # Projects with meta.json (completed/finalized)
+    completed = sorted([
         p.name for p in OUT_DIR.iterdir()
         if p.is_dir() and (p / "meta.json").exists()
     ])
+    # Projects with processing_progress.json but not yet finalized
+    incomplete = sorted([
+        p.name for p in OUT_DIR.iterdir()
+        if p.is_dir() and (p / "processing_progress.json").exists() and not (p / "meta.json").exists()
+    ])
+    return completed + incomplete
 
 async def run_in_thread(func, *args, **kwargs):
     return await asyncio.to_thread(func, *args, **kwargs)
@@ -95,10 +101,14 @@ async def main_page():
         for step_name in ["Setup", "Prepare", "Synthesize", "Finalize", "Review"]:
             ui.button(step_name).props("flat").on_click(lambda s=step_name: set_step(s))
 
+    step_change_callbacks = []
+
     def set_step(step: str):
         step_state[0] = step
         for name, card in step_cards.items():
             card.visible = (name == step)
+        for cb in step_change_callbacks:
+            cb()
 
     # ████████████████████████ Setup Card ████████████████████████
     with ui.column().classes("w-full") as setup_card:
@@ -283,6 +293,8 @@ async def main_page():
                 chapter_min_confidence=chapter_confidence.value,
                 normalize=normalize_check.value,
                 target_lufs=target_lufs.value,
+                voice_model=voice_model,
+                speaker_wav=speaker_wav,  
             )
             processor.backend_name = backend
             safe_notify("Configuration saved!", type="positive")
@@ -463,44 +475,164 @@ async def main_page():
 
         finalize_btn.on_click(lambda: on_finalize())
 
+    async def resume_project(project_name: str):
+        """Re‑create processor from saved progress, with smart fallback for old projects."""
+        nonlocal processor, book_event, speaker_event
+        progress_file = OUT_DIR / project_name / "processing_progress.json"
+        if not progress_file.exists():
+            safe_notify("No progress data found.", type="negative")
+            return
+
+        import json
+        try:
+            with progress_file.open("r") as f:
+                data = json.load(f)
+        except Exception as e:
+            safe_notify(f"Failed to read progress file: {e}", type="negative")
+            return
+
+        # ---- 1. Backend type detection ----
+        backend_type = data.get("backend_name", "unknown")
+        if backend_type == "unknown" or backend_type is None:
+            # Try to infer from saved voice files
+            if data.get("speaker_wav"):
+                backend_type = "xtts"
+            elif data.get("voice_model"):
+                backend_type = "piper"
+            else:
+                # Last resort: check if any chunk files are 24000 Hz (XTTS) vs 22050 (Piper)
+                # For simplicity, we'll just ask the user
+                safe_notify("Old project – cannot detect backend. Please re‑supply voice reference.", type="warning")
+                # Fill Setup with project name and book, then switch
+                output_name.value = project_name
+                if data.get("input_file"):
+                    book_select.value = Path(data["input_file"]).name
+                set_step("Setup")
+                return
+
+        # ---- 2. Voice paths ----
+        voice_model_path = data.get("voice_model")
+        speaker_wav_path = data.get("speaker_wav")
+        voice_model = Path(voice_model_path) if voice_model_path else None
+        speaker_wav = Path(speaker_wav_path) if speaker_wav_path else None
+
+        # ---- 3. If speaker_wav path is missing but we know it's XTTS, try to guess ----
+        if backend_type == "xtts" and speaker_wav is None:
+            # Common fallback: look for the uploaded speaker WAV in temp/ (we saved it there)
+            # Or check if the user has a known file in voices/
+            # We'll just ask the user to re‑upload
+            safe_notify("XTTS project is missing speaker WAV. Please upload it again.", type="warning")
+            output_name.value = project_name
+            set_step("Setup")
+            return
+
+        if backend_type == "piper" and voice_model is None:
+            safe_notify("Piper project is missing voice model. Please select one.", type="warning")
+            output_name.value = project_name
+            set_step("Setup")
+            return
+
+        # ---- 4. Recreate TTS backend ----
+        try:
+            tts_backend = await run_in_thread(
+                get_backend,
+                backend_type=backend_type,
+                voice_model=voice_model,
+                speaker_wav=speaker_wav,
+            )
+        except Exception as e:
+            safe_notify(f"Failed to recreate TTS backend: {e}", type="negative")
+            return
+
+        # ---- 5. Rebuild processor and load progress ----
+        try:
+            processor = IncrementalProcessor(
+                input_file=Path(data["input_file"]),
+                output_dir=OUT_DIR / project_name,
+                backend=tts_backend,
+                preset=data.get("preset", "calm_longform"),
+                chapter_strategy=data.get("chapter_strategy", "auto"),
+                chapter_min_confidence=float(data.get("chapter_min_confidence", 0.5)),
+                normalize=data.get("normalize", False),
+                target_lufs=float(data.get("target_lufs", -16.0)),
+                voice_model=voice_model,
+                speaker_wav=speaker_wav,
+            )
+            processor.backend_name = backend_type
+            await run_in_thread(processor.prepare_text)
+            loaded = await run_in_thread(processor.load_progress)
+            if not loaded:
+                safe_notify("No previous progress could be loaded.", type="warning")
+                return
+        except Exception as e:
+            safe_notify(f"Failed to resume: {e}", type="negative")
+            return
+
+        safe_notify(f"Resumed '{project_name}' – ready to continue.", type="positive")
+        set_step("Synthesize")
+
     # ████████████████████████ Review Card ████████████████████████
-    with ui.column().classes("w-full") as review_card:
+    with ui.column().classes("w-full card") as review_card:
         step_cards["Review"] = review_card
-        ui.label("5. Review Existing Projects").classes("text-h6")
-        project_select = ui.select(
-            label="Select a project",
-            options=[""] + list_projects(),
-            on_change=lambda e: refresh_review(e.value),
-        ).classes("w-full")
+        ui.label("5. Review Existing Projects").classes("text-h5 q-mb-md")
+
+        # -- widgets we update directly --
+        with ui.row().classes("items-center gap-2"):
+            project_select = ui.select(
+                label="Select a project",
+                options=[""] + list_projects(),
+                on_change=lambda e: refresh_review(e.value),
+            ).classes("flex-grow")
+            ui.button("Refresh list", icon="refresh",
+                      on_click=lambda: refresh_project_list()).props("flat")
+
         review_area = ui.column()
+
+        def refresh_project_list():
+            """Reload the list of projects (e.g. after finalising a new book)."""
+            project_select.options = [""] + list_projects()
+            project_select.value = ""   # reset selection
+            review_area.clear()
 
         def refresh_review(project_name: str):
             review_area.clear()
             if not project_name:
                 return
             project_path = OUT_DIR / project_name
-            project = BookProject(project_path)
-            meta = project.load_meta()
-            index = project.load_index()
-            with review_area:
-                ui.label(f"Backend: {meta.get('backend','?')}  |  Chunks: {len(index)}")
-                book_wav = project_path / "book.wav"
-                if book_wav.exists():
-                    ui.audio(str(book_wav)).classes("w-full")
-                chapters = sorted({m["chapter_index"] for m in index})
-                for ch in chapters:
-                    ch_wav = project_path / "chapters" / f"chapter_{ch+1:02d}.wav"
-                    with ui.expansion(f"Chapter {ch+1}", icon="menu_book").classes("w-full"):
-                        if ch_wav.exists():
-                            ui.audio(str(ch_wav))
-                        for m in index:
-                            if m["chapter_index"] == ch:
-                                chunk_wav = project_path / "chunks" / m["file"]
-                                if chunk_wav.exists():
-                                    ui.label(f"Chunk {m['id']:05d}").classes("text-caption")
-                                    ui.audio(str(chunk_wav))
+            is_incomplete = (project_path / "processing_progress.json").exists() and not (project_path / "meta.json").exists()
 
-    set_step("Setup")
+            with review_area:
+                if is_incomplete:
+                    ui.label("⚠️ This project is **incomplete** (processing was cancelled or stopped).").classes("text-orange q-mb-sm")
+                    ui.button("Resume Processing", on_click=lambda p=project_name: resume_project(p)).props("color=orange icon=play_arrow")
+                    ui.separator()
+                else:
+                    project = BookProject(project_path)
+                    meta = project.load_meta()
+                    index = project.load_index()
+                    ui.label(f"Backend: {meta.get('backend','?')}  |  Chunks: {len(index)}")
+                    book_wav = project_path / "book.wav"
+                    if book_wav.exists():
+                        ui.audio(str(book_wav)).classes("w-full")
+                    chapters = sorted({m["chapter_index"] for m in index})
+                    for ch in chapters:
+                        ch_wav = project_path / "chapters" / f"chapter_{ch+1:02d}.wav"
+                        with ui.expansion(f"Chapter {ch+1}", icon="menu_book").classes("w-full"):
+                            if ch_wav.exists():
+                                ui.audio(str(ch_wav))
+                            for m in index:
+                                if m["chapter_index"] == ch:
+                                    chunk_wav = project_path / "chunks" / m["file"]
+                                    if chunk_wav.exists():
+                                        ui.label(f"Chunk {m['id']:05d}").classes("text-caption")
+                                        ui.audio(str(chunk_wav))
+
+        # auto‑refresh when the Review step is entered
+        def on_step_change():
+            if step_state[0] == "Review":
+                refresh_project_list()
+
+        step_change_callbacks.append(on_step_change)
 
     # Footer
     ui.markdown("---")
